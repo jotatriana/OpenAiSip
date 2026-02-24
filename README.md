@@ -211,19 +211,42 @@ pip install asyncpg
 
 ### Seed data
 
-The seed script runs automatically on startup. To re-run it manually:
+The seed script runs automatically on startup. To run it manually:
 ```bash
-python -m db.seed
+python -m db.seed            # skip if data already present
+python -m db.seed --reset    # clear all rows and re-seed
 ```
 
-Default seed record:
-```
-account_id:   ACC-JT001
-full_name:    Julio Triana
-phone_number: +14372455896
-services:     internet (degraded), phone (active)
-incident:     Intermittent internet drops in your area
-```
+The seed loads **15 customers**, **33 services**, **6 open incidents**, and **5 pre-existing tickets** covering a realistic range of scenarios:
+
+| Account | Name | Type | Status |
+|---|---|---|---|
+| ACC-JT001 | Julio Triana | Residential | Active |
+| ACC-SM002 | Sarah Mitchell | Residential | Active |
+| ACC-RG003 | Robert Garcia | Business | Active |
+| ACC-LP004 | Linda Park | Residential | Suspended |
+| ACC-DW005 | David Williams | Residential | Active |
+| ACC-AC006 | Angela Chen | Business | Active |
+| ACC-MK007 | Michael Kim | Residential | Active |
+| ACC-FB008 | Fatima Bello | Residential | Active |
+| ACC-TR009 | Thomas Rivera | Business | Active |
+| ACC-NO010 | Natalie Okafor | Residential | Active |
+| ACC-JL011 | James Lee | Residential | Active |
+| ACC-PV012 | Patricia Vasquez | Business | Active |
+| ACC-CN013 | Carlos Nguyen | Residential | Cancelled |
+| ACC-EH014 | Emily Hassan | Residential | Active |
+| ACC-BT015 | Brian Thompson | Business | Active |
+
+**Open incidents in seed data:**
+
+| Account | Incident | Severity |
+|---|---|---|
+| ACC-JT001 | Intermittent internet drops in area | High |
+| ACC-RG003 | Complete internet outage — node failure | Critical |
+| ACC-AC006 | Business phone lines dropping calls | Medium |
+| ACC-NO010 | Premium TV channel pixelation | Low |
+| ACC-DW005 | Scheduled maintenance notice | Low |
+| ACC-FB008 | Slow speeds during peak hours | Medium |
 
 ## Webhook Endpoint
 
