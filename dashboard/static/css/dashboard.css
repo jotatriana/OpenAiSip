@@ -1,0 +1,199 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  transition: background var(--transition), color var(--transition);
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.header {
+  background: var(--bg-header);
+  color: var(--text-header);
+  padding: 0 1.5rem;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+.header__title { font-size: 1rem; font-weight: 600; letter-spacing: 0.02em; }
+.header__right { display: flex; align-items: center; gap: 1rem; }
+
+/* ── Connection status badge ─────────────────────────────────────────────── */
+.conn-badge {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 0.75rem; font-weight: 500; padding: 0.25rem 0.75rem;
+  border-radius: 9999px; border: 1px solid transparent;
+  transition: all var(--transition);
+}
+.conn-badge--connected    { background: var(--badge-active-bg); color: var(--status-active); }
+.conn-badge--connecting   { background: var(--badge-warn-bg);   color: var(--status-warn); }
+.conn-badge--disconnected,
+.conn-badge--backing-off  { background: var(--badge-error-bg);  color: var(--status-error); }
+.conn-badge--auth-failed  { background: #3b0764; color: #e879f9; }
+.conn-badge__dot {
+  width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+}
+.conn-badge--connected .conn-badge__dot { animation: pulse 2s infinite; }
+@keyframes pulse {
+  0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+
+/* ── Theme toggle ─────────────────────────────────────────────────────────── */
+.theme-toggle {
+  background: transparent; border: 1px solid rgba(255,255,255,0.2);
+  color: var(--text-header); padding: 0.25rem 0.75rem;
+  border-radius: var(--radius); cursor: pointer; font-size: 0.8rem;
+  transition: border-color var(--transition);
+}
+.theme-toggle:hover { border-color: rgba(255,255,255,0.5); }
+
+/* ── Auth failure banner ──────────────────────────────────────────────────── */
+.auth-banner {
+  display: none; background: #450a0a; color: #fca5a5;
+  padding: 0.75rem 1.5rem; font-size: 0.875rem; text-align: center;
+}
+.auth-banner.visible { display: block; }
+.auth-banner a { color: #fca5a5; font-weight: 600; }
+
+/* ── Login overlay ────────────────────────────────────────────────────────── */
+.login-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65); z-index: 999;
+  align-items: center; justify-content: center;
+}
+.login-overlay.visible { display: flex; }
+.login-box {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 2rem; width: 100%; max-width: 360px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.login-box__title { font-size: 1.1rem; font-weight: 700; margin-bottom: 0.25rem; }
+.login-box__sub   { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1.25rem; }
+.login-form { display: flex; flex-direction: column; gap: 0.75rem; }
+.login-input {
+  width: 100%; padding: 0.6rem 0.75rem; font-size: 0.9rem;
+  background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  outline: none;
+}
+.login-input:focus { border-color: var(--accent); }
+.login-btn {
+  padding: 0.6rem; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius); transition: opacity 0.15s;
+}
+.login-btn:hover { opacity: 0.85; }
+.login-error { font-size: 0.78rem; color: #fca5a5; margin-top: 0.5rem; min-height: 1em; }
+
+/* ── Layout ───────────────────────────────────────────────────────────────── */
+.main {
+  max-width: 1400px; margin: 0 auto;
+  padding: 1.5rem; display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto 1fr;
+  gap: 1rem;
+}
+
+/* ── Card ─────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-card);
+  overflow: hidden; transition: background var(--transition), border var(--transition);
+}
+.card__header {
+  padding: 0.875rem 1rem; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.card__title { font-size: 0.875rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-secondary); }
+.card__body { padding: 1rem; }
+
+/* ── Health panel ─────────────────────────────────────────────────────────── */
+.health-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem;
+}
+.health-metric { text-align: center; padding: 0.5rem; }
+.health-metric__value { font-size: 1.75rem; font-weight: 700; line-height: 1; }
+.health-metric__label { font-size: 0.7rem; color: var(--text-secondary);
+  text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.25rem; }
+.sip-state { font-size: 0.85rem; font-weight: 600; padding: 0.2rem 0.6rem;
+  border-radius: 9999px; display: inline-block; }
+.sip-state--registered { background: var(--badge-active-bg); color: var(--status-active); }
+.sip-state--degraded   { background: var(--badge-warn-bg);   color: var(--status-warn); }
+.sip-state--unknown    { background: var(--bg-secondary);    color: var(--text-secondary); }
+
+/* ── Calls panel ──────────────────────────────────────────────────────────── */
+.calls-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.calls-table th {
+  text-align: left; padding: 0.4rem 0.6rem;
+  color: var(--text-secondary); font-weight: 500;
+  border-bottom: 1px solid var(--border); font-size: 0.75rem;
+}
+.calls-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+.calls-table tr:last-child td { border-bottom: none; }
+.calls-table tr:hover td { background: var(--bg-secondary); }
+.call-state {
+  display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px;
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+}
+.call-state--ringing      { background: var(--badge-warn-bg);   color: var(--status-warn); }
+.call-state--active       { background: var(--badge-active-bg); color: var(--status-active); }
+.call-state--transferring { background: var(--badge-warn-bg);   color: var(--status-warn); }
+.call-state--ended,
+.call-state--failed       { background: var(--bg-secondary);    color: var(--text-secondary); }
+
+/* ── Token panel ──────────────────────────────────────────────────────────── */
+.token-summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; }
+.token-stat { text-align: center; }
+.token-stat__value { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+.token-stat__label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; }
+.token-bar { height: 8px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; margin: 0.25rem 0; }
+.token-bar__fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+.token-bar__fill--input  { background: var(--accent); }
+.token-bar__fill--output { background: var(--status-active); }
+
+/* ── Logs panel ───────────────────────────────────────────────────────────── */
+.logs-panel { grid-column: 1 / -1; }
+.logs-controls { display: flex; gap: 0.5rem; align-items: center; }
+.logs-controls select {
+  font-size: 0.75rem; padding: 0.2rem 0.5rem;
+  background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer;
+}
+.log-stream {
+  height: 320px; overflow-y: auto; font-family: var(--font-mono);
+  font-size: 0.75rem; line-height: 1.6; padding: 0.5rem;
+  background: var(--bg-secondary); border-radius: var(--radius);
+}
+.log-entry { display: grid; grid-template-columns: 140px 56px 1fr; gap: 0.5rem;
+  padding: 0.1rem 0.25rem; border-radius: 3px; }
+.log-entry:hover { background: var(--bg-card); }
+.log-entry--warning { background: var(--log-bg-warning); }
+.log-entry--error,
+.log-entry--critical { background: var(--log-bg-error); }
+.log-entry__time { color: var(--text-secondary); white-space: nowrap; }
+.log-entry__level { font-weight: 600; }
+.log-entry__level--debug    { color: var(--log-debug); }
+.log-entry__level--info     { color: var(--log-info); }
+.log-entry__level--warning  { color: var(--log-warning); }
+.log-entry__level--error    { color: var(--log-error); }
+.log-entry__level--critical { color: var(--log-critical); }
+.log-entry__msg { color: var(--text-primary); word-break: break-word; }
+
+/* ── Empty state ──────────────────────────────────────────────────────────── */
+.empty { color: var(--text-secondary); font-size: 0.8rem;
+  text-align: center; padding: 1.5rem 0; }
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .main { grid-template-columns: 1fr; }
+  .logs-panel { grid-column: 1; }
+  .health-grid { grid-template-columns: repeat(2, 1fr); }
+}
