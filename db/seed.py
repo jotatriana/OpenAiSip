@@ -19,7 +19,7 @@ CUSTOMERS = [
     {
         "account_id": "ACC-JT001",
         "full_name": "Julio Triana",
-        "phone_number": "+14372455896",
+        "phone_number": "+14168489468",
         "email": "julio@example.com",
         "account_type": "residential",
         "account_status": "active",

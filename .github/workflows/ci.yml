@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.3"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create minimal .env for tests
+        run: |
+          cat > .env << 'EOF'
+          OPENAI_API_KEY=sk-test-placeholder
+          OPENAI_PROJECT_ID=proj-test
+          WEBHOOK_SECRET=test-secret
+          DASHBOARD_API_KEY=test-dashboard-key
+          EOF
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=sip_bridge \
+            --cov=core \
+            --cov=db \
+            --cov=dashboard \
+            --cov=config \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=70 \
+            -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml

@@ -27,6 +27,9 @@ ALL_TOPICS = [
     Topic.TOKEN_USAGE,
     Topic.HEALTH_UPDATE,
     Topic.LOG_ENTRY,
+    Topic.TRANSCRIPT_TURN,
+    Topic.BUDGET_ALERT,
+    Topic.CALL_EVENT,
 ]
 
 

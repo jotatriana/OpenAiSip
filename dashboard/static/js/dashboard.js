@@ -78,10 +78,11 @@ function setConnState(state) {
 }
 
 // ── Panels ────────────────────────────────────────────────────────────────────
-const callsPanel  = new CallsPanel('calls-tbody');
-const tokensPanel = new TokensPanel('tokens-body');
-const healthPanel = new HealthPanel('health-body');
-const logsPanel   = new LogsPanel('log-stream');
+const callsPanel      = new CallsPanel('calls-tbody');
+const tokensPanel     = new TokensPanel('tokens-body');
+const healthPanel     = new HealthPanel('health-body');
+const logsPanel       = new LogsPanel('log-stream');
+const transcriptPanel = new TranscriptPanel('tx-transcript', 'tx-events', 'tx-call-select');
 
 document.getElementById('log-level-filter').addEventListener('change', (e) => {
   logsPanel.setLevelFilter(e.target.value);
@@ -92,6 +93,7 @@ function handleMessage(msg) {
   tokensPanel.handleMessage(msg);
   healthPanel.handleMessage(msg);
   logsPanel.handleMessage(msg);
+  transcriptPanel.handleMessage(msg);
 }
 
 // ── WebSocket initialisation ──────────────────────────────────────────────────

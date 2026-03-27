@@ -69,6 +69,7 @@
         <thead>
           <tr>
             <th>Call ID</th>
+            <th>Date / Time</th>
             <th>From</th>
             <th>State</th>
             <th>Phase</th>
@@ -76,9 +77,36 @@
           </tr>
         </thead>
         <tbody id="calls-tbody">
-          <tr><td colspan="5" class="empty">No calls</td></tr>
+          <tr><td colspan="6" class="empty">No calls</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Live Transcript & Events -->
+  <div class="card" style="grid-column: 1 / -1">
+    <div class="card__header">
+      <span class="card__title">Live Transcript</span>
+      <div class="tx-controls">
+        <label for="tx-call-select" style="font-size:0.75rem;color:var(--text-secondary)">Call:</label>
+        <select id="tx-call-select" style="font-size:0.75rem">
+          <option value="">— select call —</option>
+        </select>
+      </div>
+    </div>
+    <div class="tx-panel">
+      <div class="tx-panel__col">
+        <div class="tx-panel__col-header">Conversation</div>
+        <div id="tx-transcript" class="tx-stream">
+          <p class="empty">Select a call to view transcript</p>
+        </div>
+      </div>
+      <div class="tx-panel__col">
+        <div class="tx-panel__col-header">Call Events</div>
+        <div id="tx-events" class="tx-stream">
+          <p class="empty">Select a call to view events</p>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -103,12 +131,13 @@
 
 </main>
 
-<script src="/static/js/ws-client.js?v=2"></script>
-<script src="/static/js/calls-panel.js?v=2"></script>
-<script src="/static/js/tokens-panel.js?v=2"></script>
-<script src="/static/js/health-panel.js?v=2"></script>
-<script src="/static/js/logs-panel.js?v=2"></script>
-<script src="/static/js/dashboard.js?v=2"></script>
+<script src="/static/js/ws-client.js?v=7"></script>
+<script src="/static/js/calls-panel.js?v=8"></script>
+<script src="/static/js/tokens-panel.js?v=7"></script>
+<script src="/static/js/health-panel.js?v=7"></script>
+<script src="/static/js/logs-panel.js?v=7"></script>
+<script src="/static/js/transcript-panel.js?v=11"></script>
+<script src="/static/js/dashboard.js?v=7"></script>
 
 </body>
 </html>

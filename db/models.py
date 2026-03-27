@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.engine import Base
@@ -72,3 +72,103 @@ class SupportTicket(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     customer: Mapped[Customer] = relationship("Customer", back_populates="tickets")
+
+
+class CallTranscript(Base):
+    """One row per spoken turn in a call.
+
+    PCI NOTE: text is scrubbed of obvious card-number patterns before insert.
+    A production deployment should apply a certified PII detection service.
+    """
+    __tablename__ = "call_transcripts"
+    __table_args__ = (
+        Index("ix_call_transcripts_call_id", "call_id"),
+        Index("ix_call_transcripts_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    call_id: Mapped[str] = mapped_column(String, nullable=False)
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)   # 'caller' | 'assistant'
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CallEvent(Base):
+    """Append-only event log for a single call.
+
+    One row per notable event: phase transitions, tool calls, WS reconnects, etc.
+    Complements the CDR snapshot with a detailed timeline for debugging and audit.
+    """
+    __tablename__ = "call_events"
+    __table_args__ = (
+        Index("ix_call_events_call_id", "call_id"),
+        Index("ix_call_events_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    call_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)  # see EVENT_* constants
+    data: Mapped[str] = mapped_column(Text, nullable=False, default="{}")  # JSON payload
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class EscalationContext(Base):
+    """Structured handoff packet written when the AI escalates a call to a human agent.
+
+    The receiving agent's desktop app reads this by call_id or sip_call_id to get
+    a full briefing without replaying the conversation from scratch.
+    """
+    __tablename__ = "escalation_contexts"
+    __table_args__ = (
+        Index("ix_escalation_contexts_created_at", "created_at"),
+    )
+
+    call_id: Mapped[str] = mapped_column(String, primary_key=True)
+    sip_call_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    account_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    caller_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    caller_number: Mapped[str] = mapped_column(String, nullable=False, default="")
+    phase_at_escalation: Mapped[str | None] = mapped_column(String, nullable=True)
+    escalation_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    frustration_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Last N transcript turns serialised as JSON for quick display
+    recent_transcript: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CallDetailRecord(Base):
+    """Persisted call summary written at call end. Survives process restarts.
+
+    One row per call. Captures billing-relevant fields and outcome.
+    """
+    __tablename__ = "call_detail_records"
+    __table_args__ = (
+        Index("ix_cdr_created_at", "created_at"),
+        Index("ix_cdr_account_id", "account_id"),
+    )
+
+    call_id: Mapped[str] = mapped_column(String, primary_key=True)
+    sip_call_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    from_uri: Mapped[str] = mapped_column(String, nullable=False, default="")
+    to_uri: Mapped[str] = mapped_column(String, nullable=False, default="")
+    caller_number: Mapped[str] = mapped_column(String, nullable=False, default="")
+    account_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    state: Mapped[str] = mapped_column(String, nullable=False)          # ENDED | FAILED
+    phase_at_end: Mapped[str | None] = mapped_column(String, nullable=True)
+    hangup_cause: Mapped[str | None] = mapped_column(String, nullable=True)
+    escalated: Mapped[int] = mapped_column(Integer, default=0)          # 0/1 bool
+    frustration_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    input_audio_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_audio_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

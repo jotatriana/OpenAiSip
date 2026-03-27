@@ -10,7 +10,7 @@ from starlette.responses import FileResponse
 from dashboard.auth import ws_require_auth
 from dashboard.ws_manager import ws_manager
 from dashboard import health_collector
-from dashboard.routes import calls, config, health, logs, tokens
+from dashboard.routes import calls, config, health, logs, operator, tokens
 
 app = FastAPI(title="Operator Dashboard", version="1.0.0")
 
@@ -20,6 +20,7 @@ app.include_router(tokens.router)
 app.include_router(health.router)
 app.include_router(logs.router)
 app.include_router(config.router)
+app.include_router(operator.router)
 
 # Static frontend
 import os

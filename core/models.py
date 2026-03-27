@@ -20,8 +20,10 @@ class CallState(str, Enum):
 class ConvPhase(str, Enum):
     GREETING = "GREETING"
     VERIFY = "VERIFY"
+    TRIAGE = "TRIAGE"
     DIAGNOSE = "DIAGNOSE"
     RESOLVE = "RESOLVE"
+    WRAP_UP = "WRAP_UP"
 
 
 class WSState(str, Enum):
@@ -65,9 +67,10 @@ class TokenAggregate(BaseModel):
     output_text_tokens: int = 0
     output_audio_tokens: int = 0
     response_count: int = 0
+    cost_usd: float = 0.0
     last_updated: datetime = Field(default_factory=datetime.utcnow)
 
-    def add(self, usage: TokenUsage) -> None:
+    def add(self, usage: TokenUsage, cost_usd: float = 0.0) -> None:
         self.total_tokens += usage.total_tokens
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
@@ -77,6 +80,7 @@ class TokenAggregate(BaseModel):
         self.output_text_tokens += usage.output_text_tokens
         self.output_audio_tokens += usage.output_audio_tokens
         self.response_count += 1
+        self.cost_usd += cost_usd
         self.last_updated = datetime.utcnow()
 
 
@@ -89,6 +93,8 @@ class Call(BaseModel):
     to_uri: str = ""
     caller_name: str = ""
     caller_number: str = ""
+    account_id: str = ""          # set at call start if caller ID matches a known customer
+    service_names: list[str] = Field(default_factory=list)  # service types fetched at call start
     state: CallState = CallState.RINGING
     phase: ConvPhase = ConvPhase.GREETING
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -129,6 +135,8 @@ class ChannelHealth(BaseModel):
     total_calls_failed: int = 0
     last_call_at: datetime | None = None
     openai_ws_errors_1h: int = 0
+    circuit_breaker_open: bool = False
+    reconnect_failures_recent: int = 0
 
 
 # ── Log entry ─────────────────────────────────────────────────────────────────
@@ -161,3 +169,6 @@ class Topic:
     HEALTH_UPDATE = "HEALTH_UPDATE"
     LOG_ENTRY = "LOG_ENTRY"
     SNAPSHOT = "SNAPSHOT"
+    TRANSCRIPT_TURN = "TRANSCRIPT_TURN"
+    BUDGET_ALERT = "BUDGET_ALERT"
+    CALL_EVENT = "CALL_EVENT"

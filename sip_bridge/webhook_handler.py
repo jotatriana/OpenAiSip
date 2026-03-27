@@ -41,7 +41,6 @@ async def handle_incoming(request: Request) -> dict:
 
     event_type = payload.get("type")
     log.info("Webhook event: %s", event_type)
-    print(f"Received webhook payload: {payload}")
 
     try:
         if event_type == "realtime.call.incoming":
@@ -104,9 +103,50 @@ async def _handle_call_incoming(data: dict) -> None:
     await store.create_call(call)
     await bus.publish(Topic.CALL_CREATED, call.model_dump(mode="json"))
     log.info("Incoming call", extra={"call_id": call_id})
+    from db.repository import emit_call_event, EVENT_CALL_CREATED
+    emit_call_event(call_id, EVENT_CALL_CREATED, {"caller_number": caller_number, "caller_name": caller_name})
+
+    # Reject new calls in maintenance mode
+    if await store.is_maintenance_mode():
+        log.warning("Maintenance mode active — rejecting call with 503", extra={"call_id": call_id})
+        asyncio.create_task(_reject_call(call_id))
+        return
+
+    s = get_settings()
+
+    # Hard stop when daily budget is exhausted (budget=0 means no limit)
+    if s.daily_budget_usd > 0:
+        daily_cost = await store.get_daily_cost_usd()
+        if daily_cost >= s.daily_budget_usd:
+            log.warning(
+                "Daily budget $%.2f exhausted (spent $%.4f) — rejecting call",
+                s.daily_budget_usd, daily_cost,
+                extra={"call_id": call_id},
+            )
+            asyncio.create_task(_reject_call(call_id))
+            return
+
+    # Reject new calls while circuit breaker is open
+    if await store.is_circuit_open(
+        s.circuit_breaker_failure_threshold,
+        s.circuit_breaker_window_seconds,
+        s.circuit_breaker_cooldown_seconds,
+    ):
+        log.warning("Circuit breaker open — rejecting call with 503", extra={"call_id": call_id})
+        asyncio.create_task(_reject_call(call_id))
+        return
 
     # Fire-and-forget: accept call without blocking webhook response
     asyncio.create_task(_accept_call(call_id))
+
+
+async def _reject_call(call_id: str) -> None:
+    """Reject a call with SIP 503 (circuit breaker open)."""
+    from sip_bridge import call_controller
+    try:
+        await call_controller.reject(call_id, sip_status_code=503)
+    except Exception as exc:
+        log.error("Failed to reject call %s: %s", call_id, exc, extra={"call_id": call_id})
 
 
 async def _accept_call(call_id: str) -> None:
@@ -118,7 +158,46 @@ async def _accept_call(call_id: str) -> None:
         call = await store.get_call(call_id)
         caller_name   = call.caller_name   if call else ""
         caller_number = call.caller_number if call else ""
-        session_config = prompt_builder.build(ConvPhase.GREETING, caller_name=caller_name, caller_number=caller_number)
+
+        # Pre-lookup: identify caller by phone number before the session starts
+        customer: dict | None = None
+        if caller_number:
+            try:
+                from db import repository
+                customer = await repository.find_customer(caller_number, "phone")
+                if customer and call:
+                    call.account_id = customer["account_id"]
+                    # Use DB name if SIP headers didn't provide one
+                    if not call.caller_name:
+                        call.caller_name = customer["full_name"]
+                        caller_name = call.caller_name
+                    # Fetch service names so the greeting can mention them
+                    try:
+                        status = await repository.get_service_status(customer["account_id"])
+                        call.service_names = [
+                            s["service_type"] for s in status.get("services", [])
+                            if s.get("service_type")
+                        ]
+                    except Exception as svc_exc:
+                        log.warning("Service pre-fetch failed: %s", svc_exc, extra={"call_id": call_id})
+                    await store.update_call(call)
+                    log.info(
+                        "Caller identified via caller ID: %s (%s) services=%s",
+                        customer["full_name"], customer["account_id"], call.service_names,
+                        extra={"call_id": call_id},
+                    )
+            except Exception as exc:
+                log.warning("Caller ID pre-lookup failed: %s", exc, extra={"call_id": call_id})
+
+        account_id    = call.account_id    if call else ""
+        service_names = call.service_names if call else []
+        session_config = prompt_builder.build(
+            ConvPhase.GREETING,
+            caller_name=caller_name,
+            caller_number=caller_number,
+            account_id=account_id,
+            service_names=service_names,
+        )
         session_data = await call_controller.accept(call_id, session_config)
 
         # Open the per-call WebSocket session

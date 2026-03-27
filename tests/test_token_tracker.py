@@ -16,7 +16,6 @@ def call():
     return Call(call_id="call-token-test", state=CallState.ACTIVE)
 
 
-@pytest.mark.asyncio
 async def test_token_usage_aggregates_per_call(store, call):
     await store.create_call(call)
 
@@ -43,7 +42,6 @@ async def test_token_usage_aggregates_per_call(store, call):
     assert call_tokens.response_count == 2
 
 
-@pytest.mark.asyncio
 async def test_global_token_aggregation(store):
     for i in range(3):
         c = Call(call_id=f"call-{i}", state=CallState.ACTIVE)
@@ -59,13 +57,11 @@ async def test_global_token_aggregation(store):
     assert global_tokens.response_count == 3
 
 
-@pytest.mark.asyncio
 async def test_call_tokens_not_found(store):
     result = await store.get_call_tokens("nonexistent")
     assert result is None
 
 
-@pytest.mark.asyncio
 async def test_token_fields_all_tracked(store, call):
     await store.create_call(call)
     usage = TokenUsage(
