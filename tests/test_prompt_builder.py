@@ -39,11 +39,14 @@ def test_verify_phase_tools():
 
 
 def test_triage_phase_tools():
+    """TRIAGE has only phase_complete — forces model to call it (tool_choice=required at session level)."""
     names = [t["name"] for t in _tools_for_phase(ConvPhase.TRIAGE)]
-    assert "lookup_customer" in names
     assert "phase_complete" in names
-    assert "escalate_to_agent" in names
-    # TRIAGE is classify-only: service status and ticket creation belong in DIAGNOSE/RESOLVE
+    # lookup_customer removed from TRIAGE: identity is confirmed in VERIFY; TRIAGE only classifies
+    assert "lookup_customer" not in names
+    # escalate_to_agent removed: model must route via phase_complete only
+    assert "escalate_to_agent" not in names
+    # service tools belong in DIAGNOSE/RESOLVE only
     assert "get_service_status" not in names
     assert "create_ticket" not in names
 
@@ -151,9 +154,10 @@ def test_db_backed_tools_have_preamble_phrases():
 # Phase instructions reinforce tool behaviors
 # ---------------------------------------------------------------------------
 
-def test_diagnose_instructions_mention_proactive():
+def test_diagnose_instructions_call_get_service_status_immediately():
+    """DIAGNOSE instructions must tell the model to call get_service_status immediately."""
     config = build(ConvPhase.DIAGNOSE)
-    assert "PROACTIVE" in config["instructions"]
+    assert "IMMEDIATELY call get_service_status" in config["instructions"]
 
 
 def test_resolve_instructions_mention_confirmation_first():
@@ -288,11 +292,12 @@ def test_base_instructions_no_markdown():
 # ---------------------------------------------------------------------------
 
 def test_triage_instructions_guard_against_invented_account_id():
-    config = build(ConvPhase.TRIAGE)
+    """When a known caller's account_id is present, TRIAGE instructions carry the CONFIRMED ACCOUNT guard."""
+    config = build(ConvPhase.TRIAGE, account_id="ACC-JT001")
     instructions = config["instructions"]
     assert "DO NOT" in instructions
     assert "account_id" in instructions
-    assert "invent" in instructions.lower() or "guess" in instructions.lower()
+    assert "CONFIRMED ACCOUNT" in instructions
 
 
 def test_triage_phase_does_not_have_create_ticket():
@@ -357,11 +362,15 @@ def test_base_instructions_no_billing_tools():
 
 
 def test_triage_intercepts_billing_questions():
-    """TRIAGE instructions must explicitly handle billing questions and offer escalation."""
+    """TRIAGE must teach the billing category so the model routes it via phase_complete."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
     assert "billing" in instructions.lower()
-    assert "escalate_to_agent" in instructions
+    # Billing is now a routable category — TRIAGE classifies it via
+    # phase_complete(service_category="billing") rather than escalating immediately.
+    tools = {t["name"]: t for t in config["tools"]}
+    assert "service_category" in tools["phase_complete"]["parameters"]["required"]
+    assert "billing" in tools["phase_complete"]["parameters"]["properties"]["service_category"]["enum"]
 
 
 def test_diagnose_intercepts_billing_questions():
@@ -476,16 +485,16 @@ def test_triage_blocks_re_verification_when_account_known():
 # ---------------------------------------------------------------------------
 
 def test_lookup_customer_not_proactive_when_account_known():
-    """When account is already confirmed, lookup_customer must NOT be PROACTIVE."""
-    tool = next(t for t in _tools_for_phase(ConvPhase.TRIAGE, known_caller=True)
+    """When account is already confirmed, lookup_customer must NOT be PROACTIVE (check DIAGNOSE)."""
+    tool = next(t for t in _tools_for_phase(ConvPhase.DIAGNOSE, known_caller=True)
                 if t["name"] == "lookup_customer")
     assert "PROACTIVE" not in tool["description"]
     assert "ON DEMAND ONLY" in tool["description"]
 
 
 def test_lookup_customer_is_proactive_when_account_unknown():
-    """When account is not yet confirmed, lookup_customer should remain PROACTIVE."""
-    tool = next(t for t in _tools_for_phase(ConvPhase.TRIAGE, known_caller=False)
+    """When account is not yet confirmed, lookup_customer should remain PROACTIVE (check DIAGNOSE)."""
+    tool = next(t for t in _tools_for_phase(ConvPhase.DIAGNOSE, known_caller=False)
                 if t["name"] == "lookup_customer")
     assert "PROACTIVE" in tool["description"]
 
@@ -702,20 +711,21 @@ def test_triage_uses_natural_question_not_jargon():
     assert "technical issue with your service" not in instructions
 
 
-def test_triage_acknowledges_before_advancing():
-    """TRIAGE must tell the model to acknowledge the caller's issue before calling phase_complete."""
+def test_triage_is_silent_routing_phase():
+    """TRIAGE must call phase_complete in the same response as any speech (no separate turn)."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
-    # Should have a natural acknowledgment phrase like "Got it, let me look into that"
-    assert "got it" in instructions.lower() or "acknowledge" in instructions.lower()
+    # New approach: "brief phrase + phase_complete IN THE SAME RESPONSE" rather than fully silent
+    assert "same response" in instructions.lower() or "do not speak" in instructions.lower() \
+           or "classify" in instructions.lower()
 
 
 def test_triage_prohibits_fabricating_incidents():
-    """TRIAGE must explicitly forbid reporting incidents or service status (no tool to check them)."""
+    """TRIAGE must explicitly forbid checking or guessing service status."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
-    assert "fabricat" in instructions.lower() or "do not fabricate" in instructions.lower() \
-           or "cannot know" in instructions.lower() or "not looked" in instructions.lower()
+    assert "do not check" in instructions.lower() or "guess service status" in instructions.lower() \
+           or "do not troubleshoot" in instructions.lower()
 
 
 def test_triage_does_not_ask_would_you_like_ticket():
@@ -731,30 +741,29 @@ def test_triage_does_not_ask_would_you_like_ticket():
 
 
 def test_triage_caller_wants_ticket_advances_immediately():
-    """When caller says they want to open a ticket, TRIAGE must advance without any follow-up."""
+    """TRIAGE must call phase_complete immediately — no follow-up questions."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
-    assert "open a ticket" in instructions.lower()
-    # Must say to call phase_complete immediately on this intent
-    assert "immediately" in instructions.lower()
+    # Must say to call phase_complete immediately
+    assert "immediately" in instructions.lower() or "now" in instructions.lower()
+    # Must not ask diagnostic questions
+    assert "do not ask follow-up" in instructions.lower() or "do not troubleshoot" in instructions.lower()
 
 
 def test_triage_caller_asks_service_status_is_listed():
-    """TRIAGE must list service status queries as an immediately-advance case."""
+    """TRIAGE must list technical_support as a routing category for connectivity/service issues."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
-    assert "service status" in instructions.lower() or "status of my service" in instructions.lower()
+    assert "technical_support" in instructions.lower()
+    assert "outage" in instructions.lower() or "connectivity" in instructions.lower()
 
 
-def test_triage_acknowledgment_does_not_imply_data_lookup():
-    """TRIAGE acknowledgment phrase must not say 'let me check/look that up' (implies tool use)."""
+def test_triage_is_silent_no_speech_before_phase_complete():
+    """TRIAGE must not let model stall with 'one moment' before calling phase_complete."""
     config = build(ConvPhase.TRIAGE)
     instructions = config["instructions"]
-    # Must warn against lookup-implying phrases
-    assert "let me check" not in instructions.lower() or "do not say" in instructions.lower() \
-           or "do not" in instructions.lower()
-    # Must provide a neutral example phrase
-    assert "one moment" in instructions.lower() or "i can help with that" in instructions.lower()
+    # Must not instruct the model to say any acknowledgment phrases that stall the tool call
+    assert "one moment" not in instructions.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -910,3 +919,239 @@ def test_resolve_instructions_mention_update_ticket():
     """RESOLVE instructions must tell the model when to use update_ticket."""
     config = build(ConvPhase.RESOLVE)
     assert "update_ticket" in config["instructions"]
+
+
+# ---------------------------------------------------------------------------
+# Epic 1 — Multi-service intent routing tests
+# ---------------------------------------------------------------------------
+
+def test_triage_phase_complete_requires_service_category():
+    """phase_complete in TRIAGE must require service_category parameter."""
+    tools = {t["name"]: t for t in _tools_for_phase(ConvPhase.TRIAGE)}
+    assert "service_category" in tools["phase_complete"]["parameters"]["required"]
+
+
+def test_triage_phase_complete_has_all_six_categories_in_enum():
+    """phase_complete service_category enum must include all six routing values."""
+    tools = {t["name"]: t for t in _tools_for_phase(ConvPhase.TRIAGE)}
+    enum_vals = tools["phase_complete"]["parameters"]["properties"]["service_category"]["enum"]
+    for cat in ("technical_support", "billing", "sales", "move_transfer", "appointment", "account"):
+        assert cat in enum_vals, f"Missing category: {cat}"
+
+
+def test_non_triage_phase_complete_does_not_require_service_category():
+    """Non-TRIAGE phases must not require service_category in phase_complete."""
+    for phase in (ConvPhase.GREETING, ConvPhase.VERIFY, ConvPhase.DIAGNOSE, ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
+        tools = {t["name"]: t for t in _tools_for_phase(phase)}
+        required = tools["phase_complete"]["parameters"].get("required", [])
+        assert "service_category" not in required, f"Phase {phase} should not require service_category"
+
+
+def test_diagnose_tools_default_is_technical_support():
+    """No service_category defaults to technical_support tool set."""
+    default_tools = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE)}
+    ts_tools = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="technical_support")}
+    assert default_tools == ts_tools
+
+
+def test_diagnose_tools_for_technical_support_unchanged():
+    """technical_support DIAGNOSE must have the original tool set."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="technical_support")}
+    assert "get_service_status" in names
+    assert "get_ticket" in names
+    assert "get_account_history" in names
+    assert "create_ticket" in names
+
+
+def test_diagnose_tools_for_billing_category():
+    """billing DIAGNOSE must have billing tools, not technical_support tools."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="billing")}
+    assert "get_account_balance" in names
+    assert "get_payment_history" in names
+    assert "get_service_status" not in names
+    assert "create_ticket" not in names
+
+
+def test_diagnose_tools_for_sales_category():
+    """sales DIAGNOSE must have product/promo tools."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="sales")}
+    assert "get_product_catalog" in names
+    assert "get_promotions" in names
+    assert "get_service_status" not in names
+
+
+def test_diagnose_tools_for_appointment_category():
+    """appointment DIAGNOSE must have get_appointments."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="appointment")}
+    assert "get_appointments" in names
+    assert "get_service_status" not in names
+
+
+def test_diagnose_tools_for_account_category():
+    """account DIAGNOSE must have get_account_details."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="account")}
+    assert "get_account_details" in names
+    assert "get_service_status" not in names
+
+
+def test_diagnose_tools_for_move_transfer_category():
+    """move_transfer DIAGNOSE must have get_service_eligibility."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.DIAGNOSE, service_category="move_transfer")}
+    assert "get_service_eligibility" in names
+    assert "get_service_status" not in names
+
+
+def test_resolve_tools_for_billing_category():
+    """billing RESOLVE must include payment tools."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE, service_category="billing")}
+    assert "make_payment" in names
+    assert "setup_autopay" in names
+    assert "update_ticket" not in names
+
+
+def test_resolve_tools_for_appointment_category():
+    """appointment RESOLVE must include appointment action tools."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE, service_category="appointment")}
+    assert "confirm_appointment" in names
+    assert "cancel_appointment" in names
+    assert "reschedule_appointment" in names
+
+
+def test_resolve_tools_for_account_category():
+    """account RESOLVE must include update_contact_info."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE, service_category="account")}
+    assert "update_contact_info" in names
+
+
+def test_billing_diagnose_instructions_no_no_billing_access_section():
+    """When service_category=billing, the 'No Billing Access' block must not appear in DIAGNOSE."""
+    config = build(ConvPhase.DIAGNOSE, service_category="billing")
+    assert "This system has NO billing tools" not in config["instructions"]
+    assert "get_account_balance" in config["instructions"]
+
+
+def test_non_billing_phases_keep_no_billing_access_section():
+    """Non-billing DIAGNOSE must still have the No Billing Access section."""
+    config = build(ConvPhase.DIAGNOSE)
+    assert "This system has NO billing tools" in config["instructions"]
+
+
+def test_category_specific_tools_have_preamble_phrases():
+    """New category tools must include preamble sample phrases in their descriptions."""
+    new_tools = [
+        ("billing", ConvPhase.DIAGNOSE, "get_account_balance"),
+        ("sales", ConvPhase.DIAGNOSE, "get_product_catalog"),
+        ("appointment", ConvPhase.DIAGNOSE, "get_appointments"),
+        ("account", ConvPhase.DIAGNOSE, "get_account_details"),
+    ]
+    for cat, phase, tool_name in new_tools:
+        tools = {t["name"]: t for t in _tools_for_phase(phase, service_category=cat)}
+        assert tool_name in tools, f"{tool_name} missing for {cat}/{phase}"
+        assert "Preamble sample phrases" in tools[tool_name]["description"], (
+            f"{tool_name} missing preamble phrases"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests — instruction paths and RESOLVE tool sets
+# ---------------------------------------------------------------------------
+
+def test_resolve_tools_for_sales_category():
+    """sales RESOLVE must include initiate_upgrade."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE, service_category="sales")}
+    assert "initiate_upgrade" in names
+    assert "update_ticket" not in names
+
+
+def test_resolve_tools_for_move_transfer_category():
+    """move_transfer RESOLVE must include initiate_service_move and cancel_service."""
+    names = {t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE, service_category="move_transfer")}
+    assert "initiate_service_move" in names
+    assert "cancel_service" in names
+    assert "update_ticket" not in names
+
+
+def test_diagnose_instructions_for_move_transfer():
+    """move_transfer DIAGNOSE must mention get_service_eligibility."""
+    config = build(ConvPhase.DIAGNOSE, service_category="move_transfer")
+    assert "get_service_eligibility" in config["instructions"]
+    assert "Move/Transfer" in config["instructions"]
+
+
+def test_diagnose_instructions_for_account():
+    """account DIAGNOSE must mention get_account_details."""
+    config = build(ConvPhase.DIAGNOSE, service_category="account")
+    assert "get_account_details" in config["instructions"]
+    assert "Account" in config["instructions"]
+
+
+def test_diagnose_instructions_for_sales():
+    """sales DIAGNOSE must mention get_product_catalog."""
+    config = build(ConvPhase.DIAGNOSE, service_category="sales")
+    assert "get_product_catalog" in config["instructions"]
+    assert "Sales" in config["instructions"]
+
+
+def test_resolve_instructions_for_move_transfer():
+    """move_transfer RESOLVE must mention initiate_service_move and cancel_service."""
+    config = build(ConvPhase.RESOLVE, service_category="move_transfer")
+    assert "initiate_service_move" in config["instructions"]
+    assert "cancel_service" in config["instructions"]
+
+
+def test_resolve_instructions_for_account():
+    """account RESOLVE must mention update_contact_info."""
+    config = build(ConvPhase.RESOLVE, service_category="account")
+    assert "update_contact_info" in config["instructions"]
+
+
+def test_diagnose_instructions_unknown_category_falls_back_to_technical_support():
+    """Unknown service_category in _diagnose_instructions falls back to technical_support."""
+    from sip_bridge.prompt_builder import _diagnose_instructions
+    text = _diagnose_instructions("unknown_category", "")
+    assert "get_service_status" in text
+
+
+def test_resolve_instructions_unknown_category_falls_back_to_technical_support():
+    """Unknown service_category in _resolve_instructions falls back to technical_support."""
+    from sip_bridge.prompt_builder import _resolve_instructions
+    text = _resolve_instructions("unknown_category", "")
+    assert "create_ticket" in text or "update_ticket" in text
+
+
+# ---------------------------------------------------------------------------
+# create_ticket — ONE round confirmation protocol (double-confirmation fix)
+# ---------------------------------------------------------------------------
+
+def test_create_ticket_one_round_confirmation_only():
+    """create_ticket description must say confirmation is one round only — prevents double-ask."""
+    tool = next(t for t in _tools_for_phase(ConvPhase.DIAGNOSE) if t["name"] == "create_ticket")
+    desc = tool["description"]
+    assert "ONE round only" in desc
+
+
+def test_create_ticket_prohibits_second_confirmation():
+    """create_ticket description must explicitly prohibit asking to confirm a second time."""
+    tool = next(t for t in _tools_for_phase(ConvPhase.DIAGNOSE) if t["name"] == "create_ticket")
+    desc = tool["description"]
+    assert "Do NOT ask for confirmation a second time" in desc or \
+           "second time" in desc.lower()
+
+
+# ---------------------------------------------------------------------------
+# WRAP_UP — tool guidance for follow-up requests (stuck caller fix)
+# ---------------------------------------------------------------------------
+
+def test_wrap_up_guides_get_service_status_for_ticket_list():
+    """WRAP_UP instructions must tell the model to use get_service_status when caller asks about open tickets."""
+    config = build(ConvPhase.WRAP_UP)
+    instructions = config["instructions"]
+    # WRAP_UP should mention get_service_status for listing open tickets
+    assert "get_service_status" in instructions
+
+
+def test_wrap_up_guides_get_ticket_for_specific_named_ticket():
+    """WRAP_UP instructions must tell the model to use get_ticket when caller quotes a ticket ID."""
+    config = build(ConvPhase.WRAP_UP)
+    instructions = config["instructions"]
+    assert "get_ticket" in instructions

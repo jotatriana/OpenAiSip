@@ -274,6 +274,37 @@ async def test_snapshot_transcript_turns_include_all_db_turns():
     assert [t["turn_index"] for t in turns] == [0, 1, 2]
 
 
+async def test_snapshot_sent_before_client_registered(manager):
+    """Client must NOT be in _connections while the snapshot is being sent.
+
+    If the client is registered first, the broadcast loop starts delivering live
+    events before the snapshot arrives. The JS SNAPSHOT handler then replaces those
+    early events, causing data loss. Snapshot-first guarantees a clean baseline.
+    """
+    ws = _make_ws()
+    in_connections_during_snapshot: list[bool] = []
+
+    async def capture_send_json(payload):
+        # Capture whether the client is in _connections at snapshot send time
+        in_connections_during_snapshot.append(ws in manager._connections)
+
+    ws.send_json = AsyncMock(side_effect=capture_send_json)
+
+    with patch("dashboard.ws_manager.store") as mock_store, \
+         patch("dashboard.ws_manager.get_settings") as mock_cfg:
+        mock_cfg.return_value.sip_stale_threshold_seconds = 300
+        mock_store.snapshot = AsyncMock(return_value={"active_calls": [], "global_tokens": {}, "recent_logs": [], "channel_health": {}})
+        await manager.connect(ws)
+
+    assert in_connections_during_snapshot, "send_json was never called"
+    assert not in_connections_during_snapshot[0], (
+        "Client was already in _connections when the snapshot was sent — "
+        "this re-introduces the race condition where live events arrive before the snapshot"
+    )
+    # After connect() returns, the client must be registered
+    assert ws in manager._connections
+
+
 async def test_snapshot_active_call_transcript_not_capped():
     """Active calls must NOT have their transcript capped — all DB turns returned."""
     from datetime import datetime

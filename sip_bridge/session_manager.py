@@ -322,6 +322,7 @@ class SessionManager:
                 "account_id": call.account_id,
                 "state": call.state.value,
                 "phase_at_end": call.phase.value if call.phase else None,
+                "service_category": call.service_category,
                 "hangup_cause": call.hangup_cause,
                 "escalated": int(call.escalated),
                 "frustration_count": call.frustration_count,

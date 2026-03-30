@@ -272,3 +272,103 @@ async def test_teardown_transferring_sets_ended_state_and_duration():
 
     # CDR save must have been triggered (scheduled via create_task, not directly awaited)
     sm._save_cdr.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Epic 1 — service_category routing via phase_complete
+# ---------------------------------------------------------------------------
+
+def _mock_sm_for_phase_complete():
+    """Session manager mock with tool_lock and wait_for_response_done for phase_complete tests."""
+    import asyncio
+    sm = MagicMock()
+    sm.send_session_update = AsyncMock()
+    sm.send_event = AsyncMock()
+    sm.wait_for_response_done = AsyncMock()
+    sm.tool_lock = asyncio.Lock()
+    return sm
+
+
+@pytest.mark.asyncio
+async def test_service_category_set_when_triage_phase_complete_called(store):
+    """phase_complete in TRIAGE with service_category sets Call.service_category."""
+    import sip_bridge.tool_executor as executor
+
+    sm = _mock_sm_for_phase_complete()
+
+    call = Call(call_id="cat-test-1")
+    call.phase = ConvPhase.TRIAGE
+    await store.create_call(call)
+
+    with patch("core.state_store.store", store), \
+         patch("sip_bridge.prompt_builder.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            openai_model="gpt-4o-realtime-preview",
+            openai_voice="alloy",
+            default_language="en-US",
+        )
+        fsm = ConversationFSM("cat-test-1", sm)
+        fsm._phase = ConvPhase.TRIAGE
+
+        await executor.handle(
+            session_manager=sm,
+            call_id="cat-test-1",
+            response_id="resp-1",
+            item_id="item-1",
+            tool_name="phase_complete",
+            tool_args={"summary": "billing inquiry", "service_category": "billing"},
+            fsm=fsm,
+        )
+
+    updated = await store.get_call("cat-test-1")
+    assert updated.service_category == "billing"
+
+
+@pytest.mark.asyncio
+async def test_invalid_service_category_not_set(store):
+    """phase_complete with an unknown service_category value does not update the call."""
+    import sip_bridge.tool_executor as executor
+
+    sm = _mock_sm_for_phase_complete()
+
+    call = Call(call_id="cat-test-2")
+    call.phase = ConvPhase.TRIAGE
+    await store.create_call(call)
+
+    with patch("core.state_store.store", store), \
+         patch("sip_bridge.prompt_builder.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            openai_model="gpt-4o-realtime-preview",
+            openai_voice="alloy",
+            default_language="en-US",
+        )
+        fsm = ConversationFSM("cat-test-2", sm)
+        fsm._phase = ConvPhase.TRIAGE
+
+        await executor.handle(
+            session_manager=sm,
+            call_id="cat-test-2",
+            response_id="resp-2",
+            item_id="item-2",
+            tool_name="phase_complete",
+            tool_args={"summary": "bad category", "service_category": "not_valid"},
+            fsm=fsm,
+        )
+
+    updated = await store.get_call("cat-test-2")
+    assert updated.service_category is None
+
+
+@pytest.mark.asyncio
+async def test_stub_tool_returns_feature_pending():
+    """Stub tools return feature_pending status without hitting the DB."""
+    import sip_bridge.tool_executor as executor
+
+    result = executor._stub_tool("get_account_balance")
+    assert result["status"] == "feature_pending"
+    assert "agent" in result["message"].lower()
+
+    for tool_name in ("get_product_catalog", "get_appointments", "make_payment",
+                      "initiate_service_move", "update_contact_info"):
+        r = executor._stub_tool(tool_name)
+        assert r["status"] == "feature_pending"

@@ -37,10 +37,14 @@ Both servers run in the **same process** so they share a single in-memory `Event
 - **Caller ID personalisation** — display name and E.164 number parsed from SIP `From` header; caller greeted by name and pre-looked-up against the DB
 - **6-phase conversation FSM**: Greeting → Verify → Triage → Diagnose → Resolve → Wrap-Up
   - VERIFY is skipped automatically when the caller is identified by caller ID
-  - Model-driven phase transitions via `phase_complete` tool; 8-turn auto-advance safety net
-- **Live database tool calls** — `lookup_customer` (by verified phone, email, or account ID), `get_service_status` (returns services, open incidents, and open support tickets), `create_ticket`, `get_ticket` (look up any ticket by ID including resolved), `update_ticket` (change status/priority with caller confirmation), `get_account_history` (resolved tickets + incidents for repeat-caller context) — all backed by SQLAlchemy async ORM (SQLite / PostgreSQL); ticket creation requires issue summary confirmation and reads back the `ticket_id` immediately after
+  - Model-driven phase transitions via `phase_complete` tool; 8-turn auto-advance safety net (TRIAGE capped at 2 turns, DIAGNOSE at 4 turns)
+- **Service category classification** — TRIAGE requires the model to classify every caller into one of 6 categories via `phase_complete(service_category=...)`: `technical_support`, `billing`, `sales`, `move_transfer`, `appointment`, `account`; category is validated, written to `Call.service_category`, persisted to the CDR, and used to select the correct tool set for DIAGNOSE and RESOLVE
+- **Category-specific tool routing** — DIAGNOSE and RESOLVE expose only the tools for the matched category; unrelated tools are withheld entirely; `_PHASE_TOOL_ALLOWLIST` is the security backstop preventing cross-category tool calls
+- **Live database tool calls** — `lookup_customer` (by verified phone, email, or account ID), `get_service_status` (returns services, open incidents, and open support tickets), `create_ticket`, `get_ticket` (look up any ticket by ID including resolved), `update_ticket` (change status/priority with caller confirmation), `get_account_history` (resolved tickets + incidents for repeat-caller context) — all backed by SQLAlchemy async ORM (SQLite / PostgreSQL); ticket creation requires ONE-round issue summary confirmation and reads back the `ticket_id` immediately after
+- **16 v1 stub tools** for non-technical categories — `get_account_balance`, `get_payment_history`, `make_payment`, `setup_autopay` (billing); `get_product_catalog`, `get_promotions`, `initiate_upgrade` (sales); `get_service_eligibility`, `initiate_service_move`, `cancel_service` (move/transfer); `get_appointments`, `confirm_appointment`, `cancel_appointment`, `reschedule_appointment` (appointment); `get_account_details`, `update_contact_info` (account) — all return `feature_pending` and auto-escalate to a live agent; each has a preamble phrase so the caller hears a holding message
+- **Post-tool `response.create` overrides** — targeted per-phase/per-tool instruction overrides injected after each tool result to prevent common model failure modes (DIAGNOSE entry forces `tool_choice: "required"` with no instructions override to preserve session context; TRIAGE forces silent routing; RESOLVE prevents repeating DIAGNOSE; WRAP_UP prevents proactive tool calls; `get_service_status`, `create_ticket`, and `update_ticket` each have custom scripting overrides)
 - **Incident vs ticket terminology enforced** — base instructions define the distinction with explicit scripted responses for each field (`open_incidents` → "known service incident in your area", `open_support_tickets` → "open support ticket"); DIAGNOSE phase scripts both fields separately; model is explicitly prohibited from calling an incident a ticket or vice versa
-- **Billing guardrail** — no billing tool exists; every phase explicitly redirects billing questions to a live agent with a fixed phrase, preventing the model from fabricating charges or balances
+- **Billing guardrail** — for non-billing calls, every phase explicitly redirects billing questions to a live agent with a fixed phrase; for billing-category calls, the guardrail is replaced with a "Billing & Payments" section that enables the billing stub tools, preventing the model from fabricating charges or balances
 - **Confirmed account context** — when a caller is identified by caller ID, the confirmed `account_id` is injected into every phase's instructions; the model can never invent a different account ID or ask the caller to re-verify
 - **Phone lookup hard enforcement** — `ToolExecutor` validates every `lookup_customer` phone call against the session's verified caller ID before touching the DB; fabricated numbers are rejected with a log warning and the model is told to ask for email or account ID instead
 - **`lookup_customer` PROACTIVE suppressed when account known** — `_tools_for_phase()` switches the tool's behaviour tag from `PROACTIVE` to `ON DEMAND ONLY` once the account is confirmed, preventing the model from auto-calling it with invented identifiers
@@ -104,7 +108,7 @@ OpenAiSip/
 │       └── operator.py            # Maintenance, CDRs, cost, event timeline, handoff context
 ├── tests/
 │   ├── scenario_harness.py        # ScenarioHarness — full FSM test rig, all I/O mocked
-│   ├── test_scenarios.py          # 12 end-to-end scenario tests
+│   ├── test_scenarios.py          # 16 end-to-end scenario tests
 │   ├── test_conversation_fsm.py
 │   ├── test_prompt_builder.py
 │   ├── test_token_tracker.py
@@ -187,26 +191,46 @@ On startup this will:
 ```
 GREETING   →  Greet caller by name (account suffix + services for known callers); understand reason for call (1–2 exchanges max; no service tools)
 VERIFY     →  Confirm identity via lookup_customer (skipped if caller ID matched)
-TRIAGE     →  Classify issue type — acknowledge caller's issue, no service/ticket tools; billing redirected to agent
-DIAGNOSE   →  Call get_service_status once; report incidents and tickets; look up specific tickets or history on demand; say bridge phrase; advance
-RESOLVE    →  State next action (no repeating DIAGNOSE findings); create/update tickets; advance to WRAP_UP
+TRIAGE     →  Classify caller into one of 6 service categories; call phase_complete(service_category=…); max 2 turns; no service/ticket/billing tools
+DIAGNOSE   →  Call the category's primary diagnostic tool once; report findings; look up specific tickets or history on demand; say bridge phrase; advance (max 4 turns)
+RESOLVE    →  State next action (no repeating DIAGNOSE findings); create/update tickets or escalate; advance to WRAP_UP
 WRAP_UP    →  Ask if anything else; handle further issues with full tool set; thank caller; close call gracefully
 ```
 
-Each phase sends a `session.update` to the OpenAI Realtime API with phase-specific instructions and a scoped set of tools. The model calls `phase_complete` to advance; if it forgets, the FSM auto-advances after 8 turns.
+Each phase sends a `session.update` to the OpenAI Realtime API with phase-specific instructions and a scoped set of tools. The model calls `phase_complete` to advance; if it stalls, the FSM auto-advances after the phase turn limit (TRIAGE: 2, DIAGNOSE: 4, all others: 8).
 
 ### Tool availability by phase
 
-| Tool | GREETING | VERIFY | TRIAGE | DIAGNOSE | RESOLVE | WRAP_UP |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|
-| `phase_complete` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `escalate_to_agent` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `lookup_customer` | — | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `get_service_status` | — | — | — | ✓ | ✓ | ✓ |
-| `get_ticket` | — | — | — | ✓ | ✓ | ✓ |
-| `get_account_history` | — | — | — | ✓ | ✓ | ✓ |
-| `create_ticket` | — | — | — | ✓ | ✓ | ✓ |
-| `update_ticket` | — | — | — | — | ✓ | ✓ |
+Tools available in DIAGNOSE/RESOLVE depend on the `service_category` set during TRIAGE. Only the tools for the matched category are exposed; unrelated tools are withheld.
+
+| Tool | Category | GREETING | VERIFY | TRIAGE | DIAGNOSE | RESOLVE | WRAP_UP |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| `phase_complete` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `escalate_to_agent` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `lookup_customer` | — | — | ✓ | — | ✓ | ✓ | ✓ |
+| `get_service_status` | technical_support | — | — | — | ✓ | ✓ | ✓ |
+| `get_ticket` | technical_support | — | — | — | ✓ | ✓ | ✓ |
+| `get_account_history` | technical_support | — | — | — | ✓ | ✓ | ✓ |
+| `create_ticket` | technical_support | — | — | — | ✓ | ✓ | ✓ |
+| `update_ticket` | technical_support | — | — | — | — | ✓ | ✓ |
+| `get_account_balance` | billing | — | — | — | ✓ | — | — |
+| `get_payment_history` | billing | — | — | — | ✓ | — | — |
+| `make_payment` | billing | — | — | — | — | ✓ | — |
+| `setup_autopay` | billing | — | — | — | — | ✓ | — |
+| `get_product_catalog` | sales | — | — | — | ✓ | — | — |
+| `get_promotions` | sales | — | — | — | ✓ | — | — |
+| `initiate_upgrade` | sales | — | — | — | — | ✓ | — |
+| `get_service_eligibility` | move_transfer | — | — | — | ✓ | — | — |
+| `initiate_service_move` | move_transfer | — | — | — | — | ✓ | — |
+| `cancel_service` | move_transfer | — | — | — | — | ✓ | — |
+| `get_appointments` | appointment | — | — | — | ✓ | — | — |
+| `confirm_appointment` | appointment | — | — | — | — | ✓ | — |
+| `cancel_appointment` | appointment | — | — | — | — | ✓ | — |
+| `reschedule_appointment` | appointment | — | — | — | — | ✓ | — |
+| `get_account_details` | account | — | — | — | ✓ | — | — |
+| `update_contact_info` | account | — | — | — | — | ✓ | — |
+
+> Note: `lookup_customer` is not listed in TRIAGE above because it is removed from TRIAGE's tool set in the current implementation (account should already be confirmed before TRIAGE, or VERIFY handles it). All non-technical-support tools are v1 stubs that return `feature_pending` and auto-escalate.
 
 ### Escalation
 
@@ -231,7 +255,7 @@ When escalation fires, an `EscalationContext` record is written to the DB contai
 | `support_tickets` | Tickets created during calls |
 | `call_transcripts` | Per-turn transcript; PCI-scrubbed; purged after `TRANSCRIPT_RETENTION_DAYS` |
 | `call_events` | Append-only event timeline per call |
-| `call_detail_records` | CDR snapshot written at call end |
+| `call_detail_records` | CDR snapshot written at call end; includes `service_category` column |
 | `escalation_contexts` | Warm handoff packet for agent desktop |
 
 ### Switching to PostgreSQL
@@ -306,7 +330,7 @@ Connect to `ws://<host>:8001/ws/events?token=<DASHBOARD_API_KEY>`. A snapshot of
 | Maintenance mode | `POST /api/operator/maintenance?enabled=true` pauses all new calls until disabled. |
 | Budget hard stop | Rejects new calls when `daily_cost_usd >= DAILY_BUDGET_USD` (if set). |
 | Tool timeout | 5 s default; one retry on transient DB errors. |
-| Turn-limit safety | Auto-advances FSM phase after 8 model responses if `phase_complete` is never called. |
+| Turn-limit safety | Auto-advances FSM phase after the phase limit if `phase_complete` is never called (TRIAGE: 2 turns, DIAGNOSE: 4 turns, all others: 8 turns). |
 
 ## Testing
 
@@ -316,7 +340,7 @@ pytest tests/test_scenarios.py -v   # scenario tests only
 pytest --cov=sip_bridge --cov=core --cov=db --cov-report=term-missing
 ```
 
-**172 tests** across unit tests and 12 end-to-end scenario tests. CI runs automatically on push/PR via GitHub Actions.
+**216 tests** across unit tests and 16 end-to-end scenario tests. CI runs automatically on push/PR via GitHub Actions.
 
 ## Health Check
 

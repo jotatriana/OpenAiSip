@@ -158,6 +158,7 @@ class CallDetailRecord(Base):
     account_id: Mapped[str] = mapped_column(String, nullable=False, default="")
     state: Mapped[str] = mapped_column(String, nullable=False)          # ENDED | FAILED
     phase_at_end: Mapped[str | None] = mapped_column(String, nullable=True)
+    service_category: Mapped[str | None] = mapped_column(String, nullable=True)
     hangup_cause: Mapped[str | None] = mapped_column(String, nullable=True)
     escalated: Mapped[int] = mapped_column(Integer, default=0)          # 0/1 bool
     frustration_count: Mapped[int] = mapped_column(Integer, default=0)

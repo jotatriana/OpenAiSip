@@ -41,31 +41,43 @@ class ConversationFSM:
         self._sm = session_manager
         self._phase = ConvPhase.GREETING
         self._turns_in_phase = 0
+        self._phase_tools_called: set[str] = set()
 
     @property
     def phase(self) -> ConvPhase:
         return self._phase
 
+    def is_tool_already_called(self, tool_name: str) -> bool:
+        """Return True if this tool has already been called in the current phase."""
+        return tool_name in self._phase_tools_called
+
+    def record_tool_called(self, tool_name: str) -> None:
+        """Mark a tool as called for the current phase."""
+        self._phase_tools_called.add(tool_name)
+
     async def enter(self, phase: ConvPhase) -> None:
         """Enter a phase: update call state, send session.update to OpenAI."""
         self._phase = phase
         self._turns_in_phase = 0
+        self._phase_tools_called = set()
         call = await store.get_call(self._call_id)
         if call:
             call.phase = phase
             await store.update_call(call)
             await bus.publish(Topic.CALL_UPDATED, call.model_dump(mode="json"))
 
-        caller_name   = call.caller_name   if call else ""
-        caller_number = call.caller_number if call else ""
-        account_id    = call.account_id    if call else ""
-        service_names = call.service_names if call else []
+        caller_name      = call.caller_name      if call else ""
+        caller_number    = call.caller_number    if call else ""
+        account_id       = call.account_id       if call else ""
+        service_names    = call.service_names    if call else []
+        service_category = call.service_category if call else None
         config = prompt_builder.build(
             phase,
             caller_name=caller_name,
             caller_number=caller_number,
             account_id=account_id,
             service_names=service_names,
+            service_category=service_category,
         )
         await self._sm.send_session_update(config)
         log.info("Phase entered: %s", phase.value, extra={"call_id": self._call_id})
@@ -117,10 +129,21 @@ class ConversationFSM:
         """Called on each model response. Auto-advances if the turn limit is exceeded."""
         self._turns_in_phase += 1
         s = get_settings()
-        if self._turns_in_phase >= s.max_turns_per_phase:
+        # Fast phases have hard turn caps to prevent the model from stalling.
+        # TRIAGE: max 2 turns (classify and advance — no conversation allowed).
+        # DIAGNOSE: max 4 turns (tool call + report + bridge phrase; if still stuck, force advance).
+        _TRIAGE_MAX_TURNS = 2
+        _DIAGNOSE_MAX_TURNS = 4
+        if self._phase == ConvPhase.TRIAGE:
+            limit = _TRIAGE_MAX_TURNS
+        elif self._phase == ConvPhase.DIAGNOSE:
+            limit = _DIAGNOSE_MAX_TURNS
+        else:
+            limit = s.max_turns_per_phase
+        if self._turns_in_phase >= limit:
             log.warning(
                 "Turn limit (%d) reached in phase %s — auto-advancing",
-                s.max_turns_per_phase,
+                limit,
                 self._phase.value,
                 extra={"call_id": self._call_id},
             )

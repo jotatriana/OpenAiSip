@@ -51,30 +51,62 @@ OpenAI SIP → POST /webhook → webhook_handler.py
 ### Key in-memory shared state
 
 - **`core/event_bus.py`** — asyncio pub/sub hub; topics are constants in `core/models.py`. All inter-module communication goes through here.
-- **`core/state_store.py`** — in-memory registry for live calls, token usage, logs, health metrics, daily cost accumulator, and maintenance mode flag. Dashboard reads from here. `snapshot()` queries the DB for transcript turns and call events per call: active calls get all turns (no limit); ended/historical calls are capped at 200. Results returned as `active_call_transcripts` and `active_call_events`. `load_recent_cdrs(limit)` pre-populates `_calls` from the `call_detail_records` table at startup so ended calls survive a process restart.
+- **`core/state_store.py`** — in-memory registry for live calls, token usage, logs, health metrics, daily cost accumulator, and maintenance mode flag. Dashboard reads from here. `snapshot()` queries the DB for transcript turns and call events per call: active calls get all turns (no limit); ended/historical calls are capped at **50 turns**. Results returned as `active_call_transcripts` and `active_call_events`. `load_recent_cdrs(limit)` pre-populates `_calls` from the `call_detail_records` table at startup so ended calls survive a process restart.
+- **`Call` dataclass** (`core/models.py`) — includes `service_category: str | None = None`, set by TRIAGE when `phase_complete(service_category=...)` is called; persisted to CDR at call end.
+- **`SERVICE_CATEGORIES`** (`core/models.py`) — `frozenset({"technical_support", "billing", "sales", "move_transfer", "appointment", "account"})` — the allowed values for `Call.service_category`; used by `ToolExecutor` to validate the argument before writing it to state.
 
 ### Conversation FSM (`sip_bridge/conversation_fsm.py`)
 
 Six phases in order: `GREETING → VERIFY → TRIAGE → DIAGNOSE → RESOLVE → WRAP_UP`
 
 - **VERIFY** is skipped when the caller is identified by caller ID at call start (`account_id` already set).
-- Each `enter(phase)` call sends a `session.update` to OpenAI with phase-specific prompt and tool set (from `PromptBuilder`).
-- Phase advancement is model-driven via the `phase_complete` tool; a turn-count fallback auto-advances after `MAX_TURNS_PER_PHASE` (default 8) responses.
+- Each `enter(phase)` call sends a `session.update` to OpenAI with phase-specific prompt and tool set (from `PromptBuilder`). `enter()` reads `call.service_category` and passes it to `prompt_builder.build()` so DIAGNOSE and RESOLVE receive category-specific instructions and tool sets.
+- Phase advancement is model-driven via the `phase_complete` tool; a turn-count fallback auto-advances after the phase limit: TRIAGE caps at **2 turns**, DIAGNOSE at **4 turns**, all others at `MAX_TURNS_PER_PHASE` (default 8).
+- `_phase_tools_called: set[str]` is reset on every `enter()` call; `record_tool_called(name)` / `is_tool_already_called(name)` expose it to `ToolExecutor` for once-per-phase enforcement (e.g. `get_service_status`).
 - `phase_complete` from `WRAP_UP` cleanly ends the session.
 - Escalation to a human agent triggers a SIP REFER when `frustration_count >= ESCALATION_FRUSTRATION_LIMIT` (default 3) or `tool_failure_count >= ESCALATION_TOOL_FAILURE_LIMIT` (default 2).
 
+**TRIAGE service category classification:** TRIAGE now requires the model to classify the caller into one of 6 service categories via the `service_category` parameter of `phase_complete`:
+
+| Category | Triggers |
+|---|---|
+| `technical_support` | Internet/TV/phone outage, connectivity issues, tickets |
+| `billing` | Balance inquiry, payment, charge dispute, autopay setup |
+| `sales` | Plan upgrade, new service, promotions, pricing |
+| `move_transfer` | Moving home, transferring service, cancellation |
+| `appointment` | Confirm, cancel, or reschedule technician visits |
+| `account` | Contact info update, account access, general account questions |
+
+The category is validated against `SERVICE_CATEGORIES` in `core/models.py` and written to `call.service_category` before `fsm.advance()` is called. Calling `phase_complete` without `service_category` is still valid — the category stays `None` and defaults to `technical_support` behavior. The category persists to the CDR via the `service_category` column in `call_detail_records`.
+
 ### Tools available to the model
 
-| Tool | Available from | Purpose |
-|---|---|---|
-| `phase_complete` | All phases | Advance to the next phase (or end session from WRAP_UP) |
-| `escalate_to_agent` | All phases | Trigger SIP REFER to human agent |
-| `lookup_customer` | VERIFY onward | Look up account by verified phone, email, or account ID |
-| `get_service_status` | DIAGNOSE onward | Fetch services, open incidents, and open support tickets |
-| `get_ticket` | DIAGNOSE onward | Look up any ticket by ID (including resolved/closed) |
-| `get_account_history` | DIAGNOSE onward | Return resolved tickets + incidents for repeat-caller context |
-| `create_ticket` | DIAGNOSE onward | Open a support ticket |
-| `update_ticket` | RESOLVE onward | Change an existing ticket's status or priority |
+| Tool | Available from | Category | Purpose |
+|---|---|---|---|
+| `phase_complete` | All phases | — | Advance to the next phase (or end session from WRAP_UP); accepts optional `service_category` in TRIAGE |
+| `escalate_to_agent` | All phases | — | Trigger SIP REFER to human agent |
+| `lookup_customer` | VERIFY onward | — | Look up account by verified phone, email, or account ID |
+| `get_service_status` | DIAGNOSE onward | technical_support | Fetch services, open incidents, and open support tickets |
+| `get_ticket` | DIAGNOSE onward | technical_support | Look up any ticket by ID (including resolved/closed) |
+| `get_account_history` | DIAGNOSE onward | technical_support | Return resolved tickets + incidents for repeat-caller context |
+| `create_ticket` | DIAGNOSE onward | technical_support | Open a support ticket |
+| `update_ticket` | RESOLVE onward | technical_support | Change an existing ticket's status or priority |
+| `get_account_balance` | DIAGNOSE onward | billing | v1 stub — returns feature_pending, escalates to agent |
+| `get_payment_history` | DIAGNOSE onward | billing | v1 stub — returns feature_pending, escalates to agent |
+| `make_payment` | RESOLVE onward | billing | v1 stub — returns feature_pending, escalates to agent |
+| `setup_autopay` | RESOLVE onward | billing | v1 stub — returns feature_pending, escalates to agent |
+| `get_product_catalog` | DIAGNOSE onward | sales | v1 stub — returns feature_pending, escalates to agent |
+| `get_promotions` | DIAGNOSE onward | sales | v1 stub — returns feature_pending, escalates to agent |
+| `initiate_upgrade` | RESOLVE onward | sales | v1 stub — returns feature_pending, escalates to agent |
+| `get_service_eligibility` | DIAGNOSE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
+| `initiate_service_move` | RESOLVE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
+| `cancel_service` | RESOLVE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
+| `get_appointments` | DIAGNOSE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
+| `confirm_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
+| `cancel_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
+| `reschedule_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
+| `get_account_details` | DIAGNOSE onward | account | v1 stub — returns feature_pending, escalates to agent |
+| `update_contact_info` | RESOLVE onward | account | v1 stub — returns feature_pending, escalates to agent |
 
 Tool calls are handled by `ToolExecutor` in this exact sequence:
 1. **Acquire `session_manager.tool_lock`** — per-session `asyncio.Lock` that serialises concurrent handlers. When the model batches multiple function calls in a single response, all fire as concurrent asyncio tasks; without this lock they race on `_response_ready` and both send `response.create`, causing `conversation_already_has_active_response`.
@@ -82,9 +114,22 @@ Tool calls are handled by `ToolExecutor` in this exact sequence:
 3. **Inject audio preamble** — sends a text item (e.g. "I'm looking up your account now.") and `response.create` so the caller hears something while the DB query runs.
 4. **Execute the tool** — dispatched with `TOOL_TIMEOUT_SECONDS` (default 5s) timeout and one transient-error retry.
 5. **Wait for the preamble response to finish** — second `wait_for_response_done()` call ensures the preamble audio completes before sending the result.
-6. **Return result** — sends `function_call_output` item and `response.create` so the model can reply with the answer.
+6. **Return result** — sends `function_call_output` item and a **phase/tool-specific `response.create`** override (see below) so the model receives targeted guidance.
 
 Both `wait_for_response_done()` calls are required. Skipping either causes OpenAI to reject the next `response.create` with `conversation_already_has_active_response`.
+
+**Post-tool `response.create` overrides** (`tool_executor._handle_with_lock`):
+
+| Trigger | Override sent | Why |
+|---|---|---|
+| `phase_complete` → TRIAGE entry | `instructions`: "Call phase_complete now. Set service_category…" | Forces immediate silent routing |
+| `phase_complete` → DIAGNOSE entry | `tool_choice: "required"` only, **no `instructions`** | Per-response `instructions` REPLACES session-level instructions, stripping the `CONFIRMED ACCOUNT` block. Session context inherited intact. |
+| `phase_complete` → RESOLVE entry | `instructions`: action-focused, no-repeat | Prevents model repeating DIAGNOSE content; does **not** set `tool_choice: required` so model can speak before calling `create_ticket` |
+| `phase_complete` → WRAP_UP entry | `instructions`: "ask Is there anything else? and WAIT" | Prevents proactive tool calls at wrap-up entry |
+| `get_service_status` in DIAGNOSE | `instructions`: script each field + "Do NOT ask any question" + `tool_choice: required` | Prevents "Does that sound okay?" stall before `phase_complete` |
+| `get_service_status` in WRAP_UP | `instructions`: report tickets then re-ask "anything else?" | Guides model after caller asks about open tickets in wrap-up |
+| `create_ticket` (any phase) | `instructions`: read ticket_id back + call `phase_complete` + `tool_choice: required` | Prevents stuck "still working on it" loop |
+| `update_ticket` (any phase) | `instructions`: read new status back + call `phase_complete` + `tool_choice: required` | Same pattern as `create_ticket` |
 
 ### Session Manager (`sip_bridge/session_manager.py`)
 
@@ -121,13 +166,13 @@ The following rules are injected into every `session.update` via `_base_instruct
 | RESOLVE does not repeat DIAGNOSE | RESOLVE instructions explicitly say "DO NOT repeat" what was reported in DIAGNOSE; focuses only on what happens next (ETA, ticket creation, escalation) |
 | WRAP_UP does not claim issue is fixed | WRAP_UP says "diagnostic and resolution steps are complete" and warns the model not to say the problem is fixed if a service incident is still active |
 | Auto-escalation announces the transfer | Before firing the SIP REFER on threshold-based escalation, the FSM injects a `conversation.item.create` text message: "Let me connect you with one of our agents who can better assist you — please hold." and waits for `response.done` so the caller hears it before the call transfers |
-| `create_ticket` requires issue summary confirmation | Tool description instructs model to confirm the issue summary with the caller before calling; after the tool succeeds, model must IMMEDIATELY read the `ticket_id` back: "Your ticket number is [ticket_id]" |
+| `create_ticket` ONE-round confirmation protocol | Tool description instructs model to confirm the issue summary ONCE before calling ("ONE round only"). Step 1: ask once. Step 2: when caller says yes, call immediately. CRITICAL: do NOT ask for confirmation a second time. After the tool succeeds, a post-tool `response.create` override in `tool_executor` forces the model to read back the `ticket_id` and call `phase_complete`. |
 | `update_ticket` requires confirmation + readback | Tool description requires CONFIRMATION FIRST (confirm the change before calling) and readback after: "Done, your ticket is now [status]" |
 | `get_ticket` on demand for named tickets | Available from DIAGNOSE onward; ON DEMAND — triggered only when caller quotes a specific ticket ID; returns any status including resolved |
 | `get_account_history` on demand for recurring issues | Available from DIAGNOSE onward; ON DEMAND — triggered only when caller mentions a past or recurring issue |
 | Only answer what tools return | "CRITICAL — Never Fabricate" section in base instructions |
 | No result → say unable to find | Same section |
-| No billing data — redirect to agent | "CRITICAL — No Billing Access" section; fixed phrase in base instructions and in TRIAGE/DIAGNOSE/RESOLVE phases |
+| No billing data — redirect to agent (non-billing calls) | "CRITICAL — No Billing Access" block in `_base_instructions()` replaced with a "Billing & Payments" block when `service_category == "billing"`; for all other categories the redirect phrase is retained |
 | Out-of-scope deflection | Exact phrase embedded in "Scope" section |
 | No persona adoption | Explicit prohibition in role definition |
 | Short and conversational | "This is a phone call. Under 2 sentences." |
@@ -154,11 +199,19 @@ Similarly, `_resolve_lookup_args()` normalises parameter key synonyms for `looku
 
 **Phone lookup enforcement (code-level):** Before dispatching `lookup_customer` with `identifier_type='phone'`, `ToolExecutor._dispatch()` fetches the call's `caller_number` from the state store and validates the identifier against `_normalize_phone_candidates(caller_number)`. If there is no verified number or the identifier does not match, the tool returns an error dict immediately — the DB is never queried — and a `WARNING` is logged. The error message instructs the model to ask for email or account ID instead.
 
-`_tools_for_phase(phase, known_caller)` — the `known_caller` parameter changes `lookup_customer`'s behaviour tag: `PROACTIVE` when the account is not yet confirmed (VERIFY path), `ON DEMAND ONLY` when it is (post-VERIFY with known caller). This prevents the model from auto-calling the tool in TRIAGE/DIAGNOSE/RESOLVE and inventing an identifier it does not have.
+`_tools_for_phase(phase, known_caller=False, service_category=None)` — the `known_caller` parameter changes `lookup_customer`'s behaviour tag: `PROACTIVE` when the account is not yet confirmed (VERIFY path), `ON DEMAND ONLY` when it is (post-VERIFY with known caller). The `service_category` parameter controls which category-specific tools are included in DIAGNOSE and RESOLVE: only the tools for the matched category are exposed; all others are withheld. `_PHASE_TOOL_ALLOWLIST` is the security backstop and includes all 16 new stub tools as a superset across DIAGNOSE, RESOLVE, and WRAP_UP. This prevents the model from auto-calling the tool in TRIAGE/DIAGNOSE/RESOLVE and inventing an identifier it does not have.
 
 When `account_id` is known at the start of a phase, `PromptBuilder.build()` prepends `CONFIRMED ACCOUNT: The caller's account_id is <id>. Use ONLY this account_id for all tool calls. DO NOT use any other account_id.` to the TRIAGE, DIAGNOSE, RESOLVE, and WRAP_UP instructions. This prevents the model from inventing a different account_id mid-conversation (e.g. after a tool failure) or asking the caller to re-verify.
 
-TRIAGE phase does **not** have `get_service_status`, `create_ticket`, `get_ticket`, `get_account_history`, or `update_ticket`. All data-access and action tools are available from DIAGNOSE onward only. Removing them from TRIAGE proved more reliable than prompt-only instructions — the model would call them anyway when they were present. TRIAGE's sole job is to classify the issue type and call `phase_complete`.
+TRIAGE phase does **not** have `get_service_status`, `create_ticket`, `get_ticket`, `get_account_history`, or `update_ticket`. All data-access and action tools are available from DIAGNOSE onward only. Removing them from TRIAGE proved more reliable than prompt-only instructions — the model would call them anyway when they were present. TRIAGE's sole job is to classify the issue type into a `service_category` and call `phase_complete`.
+
+**`_diagnose_instructions(service_category, account_context) -> str`** — returns category-specific DIAGNOSE phase instructions (e.g. scripted billing tool usage, appointment listing). Called by `build()` when constructing the DIAGNOSE session update.
+
+**`_resolve_instructions(service_category, account_context) -> str`** — returns category-specific RESOLVE phase instructions (e.g. payment confirmation, appointment rescheduling). Called by `build()` when constructing the RESOLVE session update.
+
+**`build(phase, ..., service_category=None)`** — new `service_category` parameter threaded through to `_tools_for_phase()`, `_diagnose_instructions()`, `_resolve_instructions()`, and `_base_instructions()`.
+
+**`_stub_tool(tool_name)` helper** in `tool_executor.py` — returns `{"status": "feature_pending", "message": "...connects you to an agent."}` for all 16 new category tools. All stub tools also have preamble phrases registered in `_PREAMBLES` so the caller hears a holding message while the stub executes.
 
 **`get_ticket` response shape:** Full ticket fields including `ticket_id`, `issue_summary`, `priority`, `status`, `created_at`, `updated_at`, `resolved_at`. Returns tickets of any status (open, in_progress, resolved, closed) — unlike `get_service_status` which only returns open tickets.
 
@@ -200,7 +253,7 @@ SQLite by default (`openaisip.db`); configurable to PostgreSQL via `DATABASE_URL
 | `support_tickets` | Customer-specific tickets created via `create_ticket` — also returned as `open_support_tickets` by `get_service_status` |
 | `call_transcripts` | Per-turn transcript (PCI-scrubbed, retained `TRANSCRIPT_RETENTION_DAYS`) |
 | `call_events` | Append-only event timeline per call (phase changes, tool calls, WS events) |
-| `call_detail_records` | CDR snapshot written at call end (billing fields, token counts, cost) |
+| `call_detail_records` | CDR snapshot written at call end (billing fields, token counts, cost); includes nullable `service_category TEXT` column |
 | `escalation_contexts` | Warm handoff packet written when `escalate_to_agent` fires; read by agent desktop |
 
 Seed data (15 customers) loads on startup.
@@ -287,6 +340,8 @@ CDR_HISTORY_LIMIT              (default 20) — CDRs pre-loaded into StateStore 
 
 `dashboard/ws_manager.py` subscribes to all topics in `ALL_TOPICS` (including `CALL_EVENT`) and fans every message out to connected browser clients unchanged.
 
+**Snapshot-before-registration ordering** (`ws_manager.connect()`): The snapshot is built and sent to the client BEFORE the client is added to `_connections`. If registration happened first, the broadcast loop would start delivering live events (`CALL_EVENT`, `TRANSCRIPT_TURN`) before the snapshot arrived; the JS SNAPSHOT handler then replaces state, erasing those early events. Snapshot-first guarantees the client receives a clean baseline before any live events flow.
+
 **Snapshot on connect** (`ws_manager.connect()` → `store.snapshot()`):
 - Includes `active_call_transcripts: {call_id → turns}` and `active_call_events: {call_id → events}` for all calls (active + recent historical). Active calls receive all transcript turns (`limit=None`); ended calls are capped at **50 turns** to keep the snapshot payload fast and small.
 - All transcript/event DB queries run in **parallel** (`asyncio.gather`) — 20 CDR calls issue 40 queries concurrently rather than sequentially, keeping snapshot build time under ~100 ms instead of several seconds.
@@ -295,7 +350,7 @@ CDR_HISTORY_LIMIT              (default 20) — CDRs pre-loaded into StateStore 
 
 **Live Transcript Panel** (`dashboard/static/js/transcript-panel.js`):
 - `TranscriptPanel` class follows the same `handleMessage(msg)` pattern as `CallsPanel`, `TokensPanel`, etc.
-- On `SNAPSHOT`: **merges** snapshot turns into the existing `_transcripts` map (keyed by `turn_index`) rather than replacing it. `TRANSCRIPT_TURN` events may arrive before the snapshot — those turns are in the JS map but not yet in the DB when the snapshot queries, so a replace would erase them. Merge preserves early live turns while filling in turns from before the browser connected. Events map is replaced (no deduplication key). Stores call metadata in `_callMeta`. `_syncSelector` rebuilds the call dropdown from `snapshot.active_calls` **and re-adds any calls that arrived via `CALL_CREATED` before the snapshot landed** (race guard: slow snapshot build could otherwise wipe calls from the dropdown).
+- On `SNAPSHOT`: **merges** snapshot turns into the existing `_transcripts` map (keyed by `turn_index`) rather than replacing it. `TRANSCRIPT_TURN` events may arrive before the snapshot — those turns are in the JS map but not yet in the DB when the snapshot queries, so a replace would erase them. Merge preserves early live turns while filling in turns from before the browser connected. **Events are also merged**: snapshot events have a DB `id`; live `CALL_EVENT` bus events don't. The merge preserves live-only events (no `id`) alongside the snapshot events so no events are lost. Stores call metadata in `_callMeta`. `_syncSelector` rebuilds the call dropdown from `snapshot.active_calls` **and re-adds any calls that arrived via `CALL_CREATED` before the snapshot landed** (race guard). **Auto-selects** the first ACTIVE/RINGING/TRANSFERRING call if no call is currently selected (operator sees transcript immediately on dashboard open).
 - On `CALL_CREATED`: initialises empty maps for the new call; stores call metadata; **auto-selects the new call** in the dropdown (operator sees live transcript immediately without manual selection); option is **prepended** so new calls always appear at the top, above historical ended calls in the CDR history list.
 - On `TRANSCRIPT_TURN`: appends to the call's turn map (keyed by `turn_index` to deduplicate on reconnect).
 - On `CALL_EVENT`: appends to the call's event list.
@@ -310,8 +365,8 @@ CDR_HISTORY_LIMIT              (default 20) — CDRs pre-loaded into StateStore 
 
 ### Testing
 
-- **Unit tests** — `tests/test_conversation_fsm.py` (includes auto-escalation spoken-message test and teardown transferred-call duration/CDR test), `test_prompt_builder.py` (tool presence per phase, behaviour tags, billing/incident/ticket guardrails, phase rules, tool synonym map, TRIAGE acknowledgment, DIAGNOSE bridge phrase, RESOLVE no-repeat, WRAP_UP incident caveat, new tool phase availability and behavior tags), `test_token_tracker.py`, `test_webhook_handler.py`, `test_ws_manager.py` (snapshot parallel fetch, limit enforcement, transcript merge tests), `test_repository_events.py` (get_ticket, update_ticket, get_account_history, transcript/event helpers)
-- **Scenario tests** — `tests/test_scenarios.py` (12 end-to-end FSM flow scenarios using `ScenarioHarness`)
+- **Unit tests** — `tests/test_conversation_fsm.py` (includes auto-escalation spoken-message test and teardown transferred-call duration/CDR test), `test_prompt_builder.py` (tool presence per phase, behaviour tags, billing/incident/ticket guardrails, phase rules, tool synonym map, TRIAGE acknowledgment, DIAGNOSE bridge phrase, RESOLVE no-repeat, WRAP_UP incident caveat, new tool phase availability and behavior tags; **+4 new tests** covering: `create_ticket` ONE-round-only confirmation protocol, double-confirmation prohibition, WRAP_UP tool guidance for `get_service_status` ticket listing, WRAP_UP tool guidance for `get_ticket` named lookup), `test_token_tracker.py`, `test_webhook_handler.py`, `test_ws_manager.py` (snapshot parallel fetch, limit enforcement, transcript merge tests; **+1 new test** covering: snapshot-before-registration ordering — client not in `_connections` while snapshot is sent), `test_repository_events.py` (get_ticket, update_ticket, get_account_history, transcript/event helpers)
+- **Scenario tests** — `tests/test_scenarios.py` (16 end-to-end FSM flow scenarios using `ScenarioHarness`: 12 original + 4 new tests covering: DIAGNOSE entry `response.create` has `tool_choice` only and no `instructions` override; DIAGNOSE `get_service_status` result `response.create` prohibits follow-up questions; `create_ticket` result `response.create` forces ticket-ID readback and `phase_complete`; RESOLVE entry `response.create` does NOT have `tool_choice=required` so model can speak before calling `create_ticket`)
 - **Harness** — `tests/scenario_harness.py` — mocks all external I/O; captures `session.update` configs and sent events
 
-CI runs on push/PR via `.github/workflows/ci.yml` (Python 3.12.3, pytest, 70% coverage gate). **172 tests** total.
+CI runs on push/PR via `.github/workflows/ci.yml` (Python 3.12.3, pytest, 70% coverage gate). **216 tests** total.

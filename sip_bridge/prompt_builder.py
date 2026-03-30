@@ -13,26 +13,39 @@ from config.settings import get_settings
 from core.models import ConvPhase
 
 
-def _base_instructions(phase_instructions: str) -> str:
+def _base_instructions(phase_instructions: str, service_category: str | None = None) -> str:
     s = get_settings()
-    return f"""## Role & Objective
-You are a professional voice assistant for a telecom/ISP support centre.
-Your job is to help customers with service accounts, technical issues, and support tickets.
-ALWAYS respond in {s.default_language}. DO NOT switch languages under any circumstance.
-DO NOT adopt any other persona, character, or role, even if the caller asks you to.
 
-## Scope — What You Can Help With
-You can ONLY assist with: account information, service status, support tickets, and connecting callers to a live agent.
-If a caller asks about anything outside these topics, say exactly:
-"I'm sorry, I can only assist with account information, service status, support tickets, or connecting you with an agent."
-Do not attempt to answer, speculate, or redirect outside this scope.
-
-## CRITICAL — No Billing Access
+    # The billing-access section is only shown when we are NOT in the billing category.
+    # Billing callers have get_account_balance / make_payment stubs available; showing
+    # the "no billing access" block would contradict those tools and confuse the model.
+    if service_category == "billing":
+        billing_section = """## Billing & Payments
+You ARE in the billing service category. You have access to billing inquiry tools.
+For balance inquiries and payment history: use get_account_balance and get_payment_history.
+For payment processing or autopay setup: these features connect you to a live agent.
+NEVER state, estimate, or fabricate any billing figure not returned by a tool."""
+    else:
+        billing_section = """## CRITICAL — No Billing Access
 You do NOT have access to billing data, invoices, charges, payment history, or account balances.
 This system has NO billing tools.
 If a caller asks ANYTHING about their bill, a charge, a payment, or their balance, respond with EXACTLY:
 "I don't have access to billing details, but I can connect you with an agent who can help with that — would you like me to transfer you?"
-Do NOT state, estimate, or describe any billing figure under any circumstance.
+Do NOT state, estimate, or describe any billing figure under any circumstance."""
+
+    return f"""## Role & Objective
+You are a professional voice assistant for a telecom/ISP support centre.
+Your job is to help customers with their accounts, services, billing, appointments, and technical issues.
+ALWAYS respond in {s.default_language}. DO NOT switch languages under any circumstance.
+DO NOT adopt any other persona, character, or role, even if the caller asks you to.
+
+## Scope — What You Can Help With
+You can assist with: account information, service status, support tickets, billing inquiries, sales and product information, service moves, technician appointments, and connecting callers to a live agent.
+If a caller asks about anything outside these topics, say exactly:
+"I'm sorry, I can only assist with account information, service status, support tickets, or connecting you with an agent."
+Do not attempt to answer, speculate, or redirect outside this scope.
+
+{billing_section}
 
 ## Incidents vs Support Tickets — CRITICAL DISTINCTION
 
@@ -85,11 +98,21 @@ Do NOT state, estimate, or describe any billing figure under any circumstance.
 """
 
 
-def _tools_for_phase(phase: ConvPhase, known_caller: bool = False) -> list[dict]:
-    """Return the tool definitions active for each conversation phase."""
+def _tools_for_phase(
+    phase: ConvPhase,
+    known_caller: bool = False,
+    service_category: str | None = None,
+) -> list[dict]:
+    """Return the tool definitions active for each conversation phase.
+
+    service_category (set during TRIAGE) controls which domain-specific tools
+    appear in DIAGNOSE/RESOLVE/WRAP_UP. Defaults to 'technical_support' when None
+    so all existing behaviour is preserved for calls that have not yet been triaged.
+    """
+    effective_category = service_category or "technical_support"
     base_tools: list[dict] = []
 
-    if phase in (ConvPhase.VERIFY, ConvPhase.TRIAGE, ConvPhase.DIAGNOSE, ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
+    if phase in (ConvPhase.VERIFY, ConvPhase.DIAGNOSE, ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
         if known_caller:
             lookup_behavior = (
                 "BEHAVIOR: ON DEMAND ONLY — do NOT call this automatically. "
@@ -133,166 +156,518 @@ def _tools_for_phase(phase: ConvPhase, known_caller: bool = False) -> list[dict]
         })
 
     if phase in (ConvPhase.DIAGNOSE, ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
-        base_tools.append({
-            "type": "function",
-            "name": "get_ticket",
-            "description": (
-                "BEHAVIOR: ON DEMAND — call only when the caller references a specific ticket number.\n"
-                "Look up a specific support ticket by its ID (e.g. TKT-12345678). "
-                "Returns ticket details including status, priority, issue summary, and dates — including resolved or closed tickets. "
-                "Use when the caller says 'I'm calling about ticket TKT-...' or asks about the status of a named ticket.\n"
-                "Preamble sample phrases: 'Let me pull up that ticket.', "
-                "'I'm looking up that ticket number now.'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "ticket_id": {
-                        "type": "string",
-                        "description": "The ticket ID provided by the caller, e.g. TKT-12345678",
+        if effective_category == "technical_support":
+            base_tools.append({
+                "type": "function",
+                "name": "get_ticket",
+                "description": (
+                    "BEHAVIOR: ON DEMAND — call only when the caller references a specific ticket number.\n"
+                    "Look up a specific support ticket by its ID (e.g. TKT-12345678). "
+                    "Returns ticket details including status, priority, issue summary, and dates — including resolved or closed tickets. "
+                    "Use when the caller says 'I'm calling about ticket TKT-...' or asks about the status of a named ticket.\n"
+                    "Preamble sample phrases: 'Let me pull up that ticket.', "
+                    "'I'm looking up that ticket number now.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {
+                            "type": "string",
+                            "description": "The ticket ID provided by the caller, e.g. TKT-12345678",
+                        },
                     },
+                    "required": ["ticket_id"],
                 },
-                "required": ["ticket_id"],
-            },
-        })
-        base_tools.append({
-            "type": "function",
-            "name": "get_account_history",
-            "description": (
-                "BEHAVIOR: ON DEMAND — call when the caller mentions a past issue, a previous ticket, or says 'I had this problem before'.\n"
-                "Returns the account's resolved and closed support tickets and resolved service incidents. "
-                "Use to provide context for recurring issues or when the caller references a prior interaction.\n"
-                "Preamble sample phrases: 'Let me check your account history.', "
-                "'I'm looking up your previous cases.'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "account_id": {
-                        "type": "string",
-                        "description": "The confirmed account_id",
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "get_account_history",
+                "description": (
+                    "BEHAVIOR: ON DEMAND — call when the caller mentions a past issue, a previous ticket, or says 'I had this problem before'.\n"
+                    "Returns the account's resolved and closed support tickets and resolved service incidents. "
+                    "Use to provide context for recurring issues or when the caller references a prior interaction.\n"
+                    "Preamble sample phrases: 'Let me check your account history.', "
+                    "'I'm looking up your previous cases.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {
+                            "type": "string",
+                            "description": "The confirmed account_id",
+                        },
                     },
+                    "required": ["account_id"],
                 },
-                "required": ["account_id"],
-            },
-        })
-        base_tools.append({
-            "type": "function",
-            "name": "get_service_status",
-            "description": (
-                "BEHAVIOR: PROACTIVE, ONCE PER PHASE — call immediately when a service issue is suspected. "
-                "Call AT MOST ONCE per phase. Do NOT call again after you have already reported results in the current phase.\n"
-                "Check the current status of a customer's services, open network incidents, and open support tickets.\n"
-                "Returns: services (with status), open_incidents (network/area outages), and open_support_tickets (customer-specific tickets).\n"
-                "Use when: the customer reports an outage, degraded service, connectivity issue, or asks about existing tickets.\n"
-                "Do NOT use when: the issue is clearly billing- or account-related with no service component.\n"
-                "Preamble sample phrases: 'I'm checking your service status now.', "
-                "'Let me look into that for you.', "
-                "'One moment while I check our systems.'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "account_id": {"type": "string"},
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "get_service_status",
+                "description": (
+                    "BEHAVIOR: PROACTIVE, ONCE PER PHASE — call immediately when a service issue is suspected. "
+                    "Call AT MOST ONCE per phase. Do NOT call again after you have already reported results in the current phase.\n"
+                    "Check the current status of a customer's services, open network incidents, and open support tickets.\n"
+                    "Returns: services (with status), open_incidents (network/area outages), and open_support_tickets (customer-specific tickets).\n"
+                    "Use when: the customer reports an outage, degraded service, connectivity issue, or asks about existing tickets.\n"
+                    "Do NOT use when: the issue is clearly billing- or account-related with no service component.\n"
+                    "Preamble sample phrases: 'I'm checking your service status now.', "
+                    "'Let me look into that for you.', "
+                    "'One moment while I check our systems.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                    },
+                    "required": ["account_id"],
                 },
-                "required": ["account_id"],
-            },
-        })
-        base_tools.append({
-            "type": "function",
-            "name": "create_ticket",
-            "description": (
-                "BEHAVIOR: CONFIRMATION FIRST — ask the customer for permission before calling.\n"
-                "Create a support ticket to log the customer's issue for follow-up.\n"
-                "Use when: the issue cannot be resolved in this call and requires engineering or "
-                "back-office follow-up, or the customer explicitly asks to log a ticket.\n"
-                "Do NOT use when: the issue was already resolved in this call, "
-                "or when escalating to a live agent (use escalate_to_agent instead).\n"
-                "Before calling: confirm the issue summary with the caller so the ticket is accurate. "
-                "Ask: 'I'll log a ticket — just to confirm, the issue is [brief summary of what they described], is that right?'\n"
-                "After this tool succeeds: IMMEDIATELY read the ticket_id back to the caller. "
-                "Say: 'Done — your ticket number is [ticket_id]. Our team will follow up with you.'\n"
-                "Preamble sample phrases: 'Creating that ticket for you now.', "
-                "'I'm logging this with our support team.', "
-                "'Just a moment while I open that ticket.'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "account_id": {"type": "string"},
-                    "issue_summary": {"type": "string"},
-                    "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "create_ticket",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the issue summary ONCE before calling.\n"
+                    "Create a support ticket to log the customer's issue for follow-up.\n"
+                    "Use when: the issue cannot be resolved in this call and requires engineering or "
+                    "back-office follow-up, or the customer explicitly asks to log a ticket.\n"
+                    "Do NOT use when: the issue was already resolved in this call, "
+                    "or when escalating to a live agent (use escalate_to_agent instead).\n"
+                    "Confirmation protocol (ONE round only):\n"
+                    "  Step 1 — Ask once: 'Just to confirm, the issue is [brief summary] — is that right?'\n"
+                    "  Step 2 — When caller says yes/correct/right: say 'I'll create that ticket now.' "
+                    "and call create_ticket IMMEDIATELY in that same response.\n"
+                    "  CRITICAL: Do NOT ask for confirmation a second time. Do NOT say 'just to confirm' again "
+                    "after the caller has already confirmed. If you have confirmation, proceed directly.\n"
+                    "After this tool succeeds: IMMEDIATELY read the ticket_id back to the caller. "
+                    "Say: 'Done — your ticket number is [ticket_id]. Our team will follow up with you.'\n"
+                    "Preamble sample phrases: 'Creating that ticket for you now.', "
+                    "'I'm logging this with our support team.', "
+                    "'Just a moment while I open that ticket.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "issue_summary": {"type": "string"},
+                        "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+                    },
+                    "required": ["account_id", "issue_summary", "priority"],
                 },
-                "required": ["account_id", "issue_summary", "priority"],
-            },
-        })
+            })
+
+        elif effective_category == "billing":
+            base_tools.append({
+                "type": "function",
+                "name": "get_account_balance",
+                "description": (
+                    "BEHAVIOR: PROACTIVE, ONCE PER PHASE — call immediately when entering DIAGNOSE for a billing inquiry.\n"
+                    "Returns current balance, minimum payment due, due date, and recent payment summary.\n"
+                    "Preamble sample phrases: 'I'm pulling up your account balance.', "
+                    "'Let me check that for you.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "get_payment_history",
+                "description": (
+                    "BEHAVIOR: ON DEMAND — call when the caller asks about past payments or transactions.\n"
+                    "Returns recent payment history for the account.\n"
+                    "Preamble sample phrases: 'I'm looking up your payment history.', "
+                    "'Let me pull up your recent transactions.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
+
+        elif effective_category == "sales":
+            base_tools.append({
+                "type": "function",
+                "name": "get_product_catalog",
+                "description": (
+                    "BEHAVIOR: PROACTIVE — call when entering DIAGNOSE for a sales inquiry to fetch available plans.\n"
+                    "Returns available service plans, pricing, and features.\n"
+                    "Preamble sample phrases: 'I'm looking up our available plans and products.', "
+                    "'Let me pull up what we have for you.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Account ID to check upgrade eligibility"},
+                    },
+                    "required": [],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "get_promotions",
+                "description": (
+                    "BEHAVIOR: ON DEMAND — call when the caller asks about promotions, discounts, or special offers.\n"
+                    "Returns eligible promotions for the account.\n"
+                    "Preamble sample phrases: 'I'm checking for promotions on your account.', "
+                    "'Let me see what offers are available for you.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
+
+        elif effective_category == "move_transfer":
+            base_tools.append({
+                "type": "function",
+                "name": "get_service_eligibility",
+                "description": (
+                    "BEHAVIOR: PROACTIVE — call when entering DIAGNOSE for a move/transfer inquiry.\n"
+                    "Checks if service is available at the caller's new address.\n"
+                    "Preamble sample phrases: 'I'm checking service availability for that address.', "
+                    "'Let me verify we can serve that location.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "address": {"type": "string", "description": "The new service address to check"},
+                    },
+                    "required": ["address"],
+                },
+            })
+
+        elif effective_category == "appointment":
+            base_tools.append({
+                "type": "function",
+                "name": "get_appointments",
+                "description": (
+                    "BEHAVIOR: PROACTIVE — call immediately when entering DIAGNOSE for an appointment inquiry.\n"
+                    "Returns upcoming technician appointments for the account.\n"
+                    "Preamble sample phrases: 'I'm pulling up your appointment details.', "
+                    "'Let me check your scheduled visits.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
+
+        elif effective_category == "account":
+            base_tools.append({
+                "type": "function",
+                "name": "get_account_details",
+                "description": (
+                    "BEHAVIOR: PROACTIVE — call when entering DIAGNOSE for an account management inquiry.\n"
+                    "Returns full account settings, contact info, and preferences.\n"
+                    "Preamble sample phrases: 'I'm pulling up your account details.', "
+                    "'Let me bring up your account information.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
 
     if phase in (ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
+        if effective_category == "technical_support":
+            base_tools.append({
+                "type": "function",
+                "name": "update_ticket",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the change with the caller before calling.\n"
+                    "Update an existing support ticket's status or priority. "
+                    "Use when the caller asks to cancel a ticket, mark it resolved, close it, or change its urgency.\n"
+                    "Before calling: confirm the action — "
+                    "e.g. 'I'll mark ticket TKT-... as resolved — is that right?'\n"
+                    "After the tool succeeds: confirm back — "
+                    "e.g. 'Done, I've updated your ticket status to [status].'\n"
+                    "Preamble sample phrases: 'Updating that ticket for you now.', "
+                    "'Just a moment while I make that change.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {
+                            "type": "string",
+                            "description": "The ticket ID to update, e.g. TKT-12345678",
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["open", "in_progress", "resolved", "closed"],
+                            "description": "New status for the ticket. Omit if not changing status.",
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical"],
+                            "description": "New priority for the ticket. Omit if not changing priority.",
+                        },
+                    },
+                    "required": ["ticket_id"],
+                },
+            })
+
+        elif effective_category == "billing":
+            base_tools.append({
+                "type": "function",
+                "name": "make_payment",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the amount and method with the caller before calling.\n"
+                    "Process a payment on the account using a stored payment method token.\n"
+                    "IMPORTANT: This feature routes to a live agent for security. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm processing that payment now.', "
+                    "'Just a moment while I handle that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "amount": {"type": "number", "description": "Payment amount in dollars"},
+                    },
+                    "required": ["account_id", "amount"],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "setup_autopay",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the caller wants to set up autopay before calling.\n"
+                    "Sets up automatic recurring payments on the account.\n"
+                    "IMPORTANT: This feature routes to a live agent for security. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm setting up automatic payments for you.', "
+                    "'Just a moment while I configure that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"],
+                },
+            })
+
+        elif effective_category == "sales":
+            base_tools.append({
+                "type": "function",
+                "name": "initiate_upgrade",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the plan choice with the caller before calling.\n"
+                    "Submits a service upgrade request for the account.\n"
+                    "IMPORTANT: This feature routes to a live agent for processing. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm processing that upgrade request for you now.', "
+                    "'Just a moment while I submit that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "product_id": {"type": "string", "description": "The plan or product ID to upgrade to"},
+                    },
+                    "required": ["account_id", "product_id"],
+                },
+            })
+
+        elif effective_category == "move_transfer":
+            base_tools.append({
+                "type": "function",
+                "name": "initiate_service_move",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the new address with the caller before calling.\n"
+                    "Submits a service move request to transfer service to a new address.\n"
+                    "IMPORTANT: This feature routes to a live agent. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm submitting that service move request.', "
+                    "'Just a moment while I process that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "new_address": {"type": "string"},
+                    },
+                    "required": ["account_id", "new_address"],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "cancel_service",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the cancellation with the caller before calling.\n"
+                    "Initiates service cancellation for the account.\n"
+                    "IMPORTANT: This feature routes to a live agent for retention review. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm processing that cancellation request.', "
+                    "'Just a moment while I submit that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["account_id", "reason"],
+                },
+            })
+
+        elif effective_category == "appointment":
+            base_tools.append({
+                "type": "function",
+                "name": "confirm_appointment",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the appointment details with the caller before calling.\n"
+                    "Marks a technician appointment as confirmed by the customer.\n"
+                    "Preamble sample phrases: 'I'm confirming that appointment for you now.', "
+                    "'Just a moment while I update that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {"type": "string"},
+                    },
+                    "required": ["appointment_id"],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "cancel_appointment",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the cancellation with the caller before calling.\n"
+                    "Cancels a technician appointment.\n"
+                    "Preamble sample phrases: 'I'm cancelling that appointment now.', "
+                    "'Just a moment while I process that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {"type": "string"},
+                    },
+                    "required": ["appointment_id"],
+                },
+            })
+            base_tools.append({
+                "type": "function",
+                "name": "reschedule_appointment",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — confirm the new date/time preference with the caller before calling.\n"
+                    "Submits a reschedule request for a technician appointment.\n"
+                    "IMPORTANT: This feature routes to a live agent. "
+                    "If the tool returns feature_pending, inform the caller and offer to connect them with an agent.\n"
+                    "Preamble sample phrases: 'I'm submitting that reschedule request.', "
+                    "'Just a moment while I process that.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {"type": "string"},
+                        "preferred_time": {"type": "string", "description": "Caller's preferred date/time range"},
+                    },
+                    "required": ["appointment_id", "preferred_time"],
+                },
+            })
+
+        elif effective_category == "account":
+            base_tools.append({
+                "type": "function",
+                "name": "update_contact_info",
+                "description": (
+                    "BEHAVIOR: CONFIRMATION FIRST — read back the new value to the caller before calling.\n"
+                    "Updates a contact info field on the account (email, phone, or address).\n"
+                    "Preamble sample phrases: 'I'm updating your account information now.', "
+                    "'Just a moment while I make that change.'"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "field": {"type": "string", "enum": ["email", "phone", "address"]},
+                        "value": {"type": "string", "description": "The new value for the field"},
+                    },
+                    "required": ["account_id", "field", "value"],
+                },
+            })
+
+    # phase_complete signals the FSM to advance. Available in every phase.
+    # In TRIAGE, it also accepts service_category to route the conversation.
+    if phase == ConvPhase.TRIAGE:
         base_tools.append({
             "type": "function",
-            "name": "update_ticket",
+            "name": "phase_complete",
             "description": (
-                "BEHAVIOR: CONFIRMATION FIRST — confirm the change with the caller before calling.\n"
-                "Update an existing support ticket's status or priority. "
-                "Use when the caller asks to cancel a ticket, mark it resolved, close it, or change its urgency.\n"
-                "Before calling: confirm the action — "
-                "e.g. 'I'll mark ticket TKT-... as resolved — is that right?'\n"
-                "After the tool succeeds: confirm back — "
-                "e.g. 'Done, I've updated your ticket status to [status].'\n"
-                "Preamble sample phrases: 'Updating that ticket for you now.', "
-                "'Just a moment while I make that change.'"
+                "BEHAVIOR: AUTONOMOUS — call this immediately once you know what the caller needs.\n"
+                "You MUST provide service_category — this drives the entire remaining conversation.\n"
+                "Do NOT call this without a service_category value. Use the closest matching category.\n"
+                "Do NOT forget to call this — every phase must end with either phase_complete or escalate_to_agent."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticket_id": {
+                    "summary": {
                         "type": "string",
-                        "description": "The ticket ID to update, e.g. TKT-12345678",
+                        "description": "Brief description of what the caller needs.",
                     },
-                    "status": {
+                    "service_category": {
                         "type": "string",
-                        "enum": ["open", "in_progress", "resolved", "closed"],
-                        "description": "New status for the ticket. Omit if not changing status.",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["low", "medium", "high", "critical"],
-                        "description": "New priority for the ticket. Omit if not changing priority.",
+                        "enum": [
+                            "technical_support",
+                            "billing",
+                            "sales",
+                            "move_transfer",
+                            "appointment",
+                            "account",
+                        ],
+                        "description": (
+                            "The service category that best fits the caller's stated reason:\n"
+                            "- technical_support: internet/TV/phone outage, slow speeds, connectivity issues, hardware problems, service tickets\n"
+                            "- billing: balance inquiry, payment, charge dispute, autopay, invoice question\n"
+                            "- sales: plan upgrade, new service, promotions, pricing questions\n"
+                            "- move_transfer: moving home, transferring service to a new address, service cancellation\n"
+                            "- appointment: confirm, cancel, or reschedule a technician visit\n"
+                            "- account: password reset, contact info update, account access, general account questions"
+                        ),
                     },
                 },
-                "required": ["ticket_id"],
+                "required": ["summary", "service_category"],
+            },
+        })
+    else:
+        base_tools.append({
+            "type": "function",
+            "name": "phase_complete",
+            "description": (
+                "BEHAVIOR: AUTONOMOUS — call this when your current phase objective is fully met.\n"
+                "Signal that the current conversation phase is complete and advance to the next phase.\n"
+                "Use when: you have achieved the objective stated in your current ## Phase instructions.\n"
+                "Do NOT use when: the phase objective is not yet fully met or the caller has unanswered questions.\n"
+                "Do NOT forget to call this — every phase must end with either phase_complete or escalate_to_agent.\n"
+                "In WRAP_UP: call phase_complete when the caller confirms they have no further questions — "
+                "this will end the call cleanly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": (
+                            "Brief description of what was accomplished in this phase. "
+                            "Example: 'Caller identified as account A123, reporting internet outage since yesterday.'"
+                        ),
+                    },
+                },
+                "required": ["summary"],
             },
         })
 
-    # phase_complete signals the FSM to advance. Available in every phase.
-    base_tools.append({
-        "type": "function",
-        "name": "phase_complete",
-        "description": (
-            "BEHAVIOR: AUTONOMOUS — call this when your current phase objective is fully met.\n"
-            "Signal that the current conversation phase is complete and advance to the next phase.\n"
-            "Use when: you have achieved the objective stated in your current ## Phase instructions.\n"
-            "Do NOT use when: the phase objective is not yet fully met or the caller has unanswered questions.\n"
-            "Do NOT forget to call this — every phase must end with either phase_complete or escalate_to_agent.\n"
-            "In WRAP_UP: call phase_complete when the caller confirms they have no further questions — "
-            "this will end the call cleanly."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": (
-                        "Brief description of what was accomplished in this phase. "
-                        "Example: 'Caller identified as account A123, reporting internet outage since yesterday.'"
-                    ),
-                },
-            },
-            "required": ["summary"],
-        },
-    })
+    # Available in all phases EXCEPT TRIAGE — TRIAGE must route via phase_complete only.
+    # If a caller demands a human in TRIAGE, the model routes to a category and DIAGNOSE escalates.
+    if phase == ConvPhase.TRIAGE:
+        return base_tools
 
-    # Available in every phase so the AI can transfer at any point
     base_tools.append({
         "type": "function",
         "name": "escalate_to_agent",
@@ -324,12 +699,184 @@ def _tools_for_phase(phase: ConvPhase, known_caller: bool = False) -> list[dict]
     return base_tools
 
 
+def _diagnose_instructions(service_category: str | None, account_context: str) -> str:
+    """Return DIAGNOSE phase instructions for the given service category."""
+    cat = service_category or "technical_support"
+
+    if cat == "technical_support":
+        return (
+            "## Diagnosis Phase\n"
+            + account_context
+            + "- IMMEDIATELY call get_service_status as the VERY FIRST action in this phase. Do NOT speak first.\n"
+            "- DO NOT ask the caller any questions before calling get_service_status. "
+            "Do NOT ask about devices, modems, lights, routers, or when the issue started. "
+            "Do NOT troubleshoot. The tool result is your only source of information.\n"
+            "- When get_service_status returns results, report open_incidents and open_support_tickets SEPARATELY:\n"
+            "  * open_incidents → say 'There is a known service incident in your area: [title]. Our team is working on it.'\n"
+            "  * open_support_tickets → say 'You have an open support ticket: [summary].'\n"
+            "  * If open_support_tickets is empty → say 'You have no open support tickets.'\n"
+            "  * NEVER merge or confuse these two — they are different things requiring different actions.\n"
+            "- After reporting ALL results, say a brief bridge phrase such as 'Let me see what I can do about this.' "
+            "then IMMEDIATELY call phase_complete. Do NOT ask 'Is there anything else?' or wait for the caller — "
+            "that question belongs to WRAP_UP.\n"
+            "- Do NOT call get_service_status more than once in this phase.\n"
+            "- If the caller references a specific ticket number: call get_ticket to look it up directly.\n"
+            "- If the caller mentions a past or recurring issue: call get_account_history.\n"
+            "- If the caller raises a billing question, charge, or payment: respond 'I don't have access to billing details, "
+            "but I can connect you with an agent who can help — would you like me to transfer you?' and call escalate_to_agent if they agree.\n"
+            "- If a tool call fails, acknowledge it calmly: 'I wasn't able to retrieve that — let me try another way.'\n"
+            "- EXIT this phase once you have reported all status information."
+        )
+    elif cat == "billing":
+        return (
+            "## Diagnosis Phase — Billing\n"
+            + account_context
+            + "- Call get_account_balance ONCE immediately when entering this phase (it is PROACTIVE).\n"
+            "- Report the balance, minimum payment, and due date clearly and naturally.\n"
+            "- If the caller asks about payment history, call get_payment_history ON DEMAND.\n"
+            "- For any payment action (make payment, set up autopay): these features connect you to a live agent. "
+            "Say 'I can help you with that — let me connect you with a billing specialist.' "
+            "and call escalate_to_agent with reason 'billing action required'.\n"
+            "- NEVER state, estimate, or invent any billing figure not returned by a tool.\n"
+            "- After reporting all information, call phase_complete."
+        )
+    elif cat == "sales":
+        return (
+            "## Diagnosis Phase — Sales\n"
+            + account_context
+            + "- Call get_product_catalog immediately when entering this phase to fetch available plans.\n"
+            "- Present the available plans clearly and naturally — no bullet points, no dollar signs.\n"
+            "- If the caller asks about promotions or special offers, call get_promotions ON DEMAND.\n"
+            "- Listen to which plan or product interests the caller. Note it for RESOLVE.\n"
+            "- After presenting options, call phase_complete."
+        )
+    elif cat == "move_transfer":
+        return (
+            "## Diagnosis Phase — Move/Transfer\n"
+            + account_context
+            + "- Ask the caller for their new service address if they haven't provided it yet.\n"
+            "- Call get_service_eligibility to check if we can serve the new address.\n"
+            "- Report the eligibility result to the caller.\n"
+            "- If they are asking about cancellation (no new address), proceed to RESOLVE without calling get_service_eligibility.\n"
+            "- After reporting eligibility, call phase_complete."
+        )
+    elif cat == "appointment":
+        return (
+            "## Diagnosis Phase — Appointment\n"
+            + account_context
+            + "- Call get_appointments immediately when entering this phase (it is PROACTIVE).\n"
+            "- Report any upcoming technician appointments to the caller: date, time window, and type of visit.\n"
+            "- Ask the caller what they need: confirm, cancel, or reschedule. Note their intent for RESOLVE.\n"
+            "- After reporting appointment details, call phase_complete."
+        )
+    elif cat == "account":
+        return (
+            "## Diagnosis Phase — Account\n"
+            + account_context
+            + "- Call get_account_details immediately when entering this phase to fetch current account info.\n"
+            "- Report the relevant account details the caller is asking about.\n"
+            "- Identify what the caller wants to change or check.\n"
+            "- If a tool call fails, acknowledge it calmly.\n"
+            "- After reporting account information, call phase_complete."
+        )
+    else:
+        # Fallback to technical_support path for unknown categories
+        return _diagnose_instructions("technical_support", account_context)
+
+
+def _resolve_instructions(service_category: str | None, account_context: str) -> str:
+    """Return RESOLVE phase instructions for the given service category."""
+    cat = service_category or "technical_support"
+
+    if cat == "technical_support":
+        return (
+            "## Resolution Phase\n"
+            + account_context
+            + "- The caller has already heard the status report from the previous phase. DO NOT repeat it. "
+            "Focus ONLY on what action is being taken or what the caller should expect.\n"
+            "- If a service incident is active and no ticket is needed: "
+            "tell the caller what to expect next and call phase_complete.\n"
+            "- If the issue needs a new support ticket: use create_ticket (CONFIRMATION FIRST; "
+            "read back ticket_id immediately: 'Your ticket number is [ticket_id] — our team will follow up.'). "
+            "Then call phase_complete.\n"
+            "- If the caller wants to update an existing ticket: use update_ticket "
+            "(CONFIRMATION FIRST; confirm back: 'Done, your ticket is now [status].'). Then call phase_complete.\n"
+            "- If no tool action is needed: state what happens next and IMMEDIATELY call phase_complete.\n"
+            "- escalate_to_agent: you MUST call the tool — do NOT just say you will transfer the customer.\n"
+            "- If a tool call fails: tell the customer and offer an alternative.\n"
+            "- Once the resolution is stated or action taken, call phase_complete. "
+            "Do NOT ask 'Is there anything else?' here — that belongs in WRAP_UP."
+        )
+    elif cat == "billing":
+        return (
+            "## Resolution Phase — Billing\n"
+            + account_context
+            + "- The caller has seen their balance. Focus on what action they want to take.\n"
+            "- If the caller wants to make a payment: call make_payment (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, say 'I'll connect you with a billing specialist to process that.' "
+            "and call escalate_to_agent with reason 'payment processing required'.\n"
+            "- If the caller wants to set up autopay: call setup_autopay (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, escalate to a billing agent.\n"
+            "- If no action is needed: confirm what the caller now knows and call phase_complete.\n"
+            "- NEVER state, estimate, or invent any billing figure not returned by a tool.\n"
+            "- Once the resolution action is taken or stated, call phase_complete."
+        )
+    elif cat == "sales":
+        return (
+            "## Resolution Phase — Sales\n"
+            + account_context
+            + "- The caller has seen the available plans. Take the action they requested.\n"
+            "- If the caller wants to proceed with an upgrade: call initiate_upgrade (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, say 'I'll connect you with our sales team to complete that.' "
+            "and call escalate_to_agent with reason 'upgrade processing required'.\n"
+            "- If the caller is still deciding: provide any final information they need and call phase_complete.\n"
+            "- Once the action is taken or the caller is satisfied, call phase_complete."
+        )
+    elif cat == "move_transfer":
+        return (
+            "## Resolution Phase — Move/Transfer\n"
+            + account_context
+            + "- The caller knows the eligibility result. Take the action they need.\n"
+            "- If the caller wants to proceed with a service move: call initiate_service_move (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, escalate to an agent.\n"
+            "- If the caller wants to cancel service: call cancel_service (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, say 'I'll connect you with our team to process that.' "
+            "and call escalate_to_agent.\n"
+            "- Once the action is taken or confirmed, call phase_complete."
+        )
+    elif cat == "appointment":
+        return (
+            "## Resolution Phase — Appointment\n"
+            + account_context
+            + "- The caller has seen their appointment details. Take the action they requested.\n"
+            "- Confirm appointment: call confirm_appointment (CONFIRMATION FIRST).\n"
+            "- Cancel appointment: call cancel_appointment (CONFIRMATION FIRST).\n"
+            "- Reschedule: call reschedule_appointment (CONFIRMATION FIRST). "
+            "If the tool returns feature_pending, escalate to an agent.\n"
+            "- Confirm the outcome to the caller and call phase_complete."
+        )
+    elif cat == "account":
+        return (
+            "## Resolution Phase — Account\n"
+            + account_context
+            + "- The caller knows their account details. Take the action they requested.\n"
+            "- If the caller wants to update contact info: call update_contact_info "
+            "(CONFIRMATION FIRST — read back the new value before calling; "
+            "confirm after: 'Done, I've updated your [field] to [value].'). Then call phase_complete.\n"
+            "- If no change is needed: confirm the information and call phase_complete.\n"
+            "- Once the resolution action is taken, call phase_complete."
+        )
+    else:
+        return _resolve_instructions("technical_support", account_context)
+
+
 def build(
     phase: ConvPhase,
     caller_name: str = "",
     caller_number: str = "",
     account_id: str = "",
     service_names: list[str] | None = None,
+    service_category: str | None = None,
 ) -> dict:
     """Build a session.update config dict for the given conversation phase."""
     s = get_settings()
@@ -397,30 +944,24 @@ def build(
         ConvPhase.TRIAGE: (
             "## Triage Phase\n"
             + _account_context
-            + "- Your ONLY goal is to classify the caller's issue and call phase_complete. Nothing else.\n"
-            "- CRITICAL — NO SERVICE DATA IN THIS PHASE: You have NOT checked any service status. "
-            "You have NO knowledge of incidents, outages, or tickets at this point. "
-            "Any statement about service status, incidents, or outages is fabrication. DO NOT fabricate. "
-            "DO NOT say 'there is a known issue', DO NOT say 'our team is working on it', "
-            "DO NOT say 'an incident is affecting your area' — you have not looked this up and you cannot know.\n"
-            "- DO NOT ask 'Would you like me to open a ticket?' in this phase — ticket creation happens in RESOLVE. "
-            "Do NOT pre-confirm any action. Just classify and advance.\n"
-            "- If the caller has already described their issue "
-            "(e.g. 'my internet is down', 'I want to open a ticket', 'I want to check my service status', "
-            "'I have a billing question', 'I want to check my tickets'): "
-            "acknowledge it with ONE short neutral phrase and IMMEDIATELY call phase_complete. "
-            "Use phrases like 'Of course, one moment.' or 'Sure, I can help with that.' — "
-            "DO NOT say 'let me check that', 'let me look that up', or any phrase implying you are about to "
-            "retrieve data, because you have no data tools in this phase. "
-            "Do NOT ask any follow-up question. Do NOT offer any information. Just advance.\n"
-            "- If you do not yet know what the caller needs, ask ONE simple open question: 'What can I help you with today?'\n"
-            "- If the caller mentions billing, a charge, a payment, or their balance: say "
-            "'I don't have access to billing details, but I can connect you with an agent who can help — would you like me to transfer you?' "
-            "and call escalate_to_agent if they agree.\n"
-            + ("- DO NOT ask the caller to re-verify their identity — their account is already confirmed.\n" if known_caller else
-               "- DO NOT call get_service_status or create_ticket here.\n"
-               "- DO NOT invent or guess an account_id. If you do not have one, do not call account tools.\n")
-            + "- As soon as you understand the nature of the issue, call phase_complete immediately — no delay, no extra questions."
+            + "Your ONLY job: classify the caller's issue and call phase_complete.\n"
+            "- You may say ONE brief phrase (e.g. 'Got it.' or 'Sure.'). "
+            "You MUST call phase_complete IN THE SAME RESPONSE as any speech — not after, not later. NOW.\n"
+            "- DO NOT ask follow-up questions. DO NOT troubleshoot. DO NOT diagnose hardware. "
+            "DO NOT ask about devices, modems, or lights. DO NOT check or guess service status.\n"
+            "- Categories:\n"
+            "  * technical_support — internet/TV/phone/connectivity issues, outages, slow speeds\n"
+            "  * billing — payment, balance, invoice, autopay\n"
+            "  * sales — plan upgrade, new service, promotions, pricing\n"
+            "  * move_transfer — moving home, service cancellation, transfer\n"
+            "  * appointment — confirm, cancel, or reschedule a technician visit\n"
+            "  * account — password, contact info, account access\n"
+            "- If caller hasn't described their issue: ask 'What can I help you with today?' "
+            "then call phase_complete immediately on their answer.\n"
+            "- Default to technical_support when in doubt. Never leave service_category blank.\n"
+            + ("- Account is confirmed — do NOT re-verify.\n" if known_caller else
+               "- DO NOT call get_service_status or create_ticket here.\n")
+            + "- Call phase_complete NOW — in this response."
         ),
         ConvPhase.VERIFY: (
             "## Verification Phase\n"
@@ -443,56 +984,8 @@ def build(
                 + "- EXIT this phase once identity is confirmed."
             )
         ),
-        ConvPhase.DIAGNOSE: (
-            "## Diagnosis Phase\n"
-            + _account_context
-            + "- Call get_service_status ONCE as soon as you enter this phase (it is PROACTIVE).\n"
-            "- When get_service_status returns results, report open_incidents and open_support_tickets SEPARATELY:\n"
-            "  * open_incidents → say 'There is a known service incident in your area: [title]. Our team is working on it.'\n"
-            "  * open_support_tickets → say 'You have an open support ticket: [summary].'\n"
-            "  * If open_support_tickets is empty → say 'You have no open support tickets.'\n"
-            "  * NEVER merge or confuse these two — they are different things requiring different actions.\n"
-            "- After reporting ALL results (both open_incidents and open_support_tickets), say a brief bridge phrase "
-            "such as 'Let me see what I can do about this.' then IMMEDIATELY call phase_complete.\n"
-            "  Do NOT ask 'Is there anything else?' or wait for the caller to respond before advancing — "
-            "that question belongs to WRAP_UP.\n"
-            "- Do NOT call get_service_status more than once in this phase.\n"
-            "- If the caller references a specific ticket number (e.g. 'TKT-12345678'): call get_ticket to look it up directly.\n"
-            "- If the caller mentions a past or recurring issue: call get_account_history to check prior resolved records.\n"
-            "- If the caller raises a billing question, charge, or payment: respond 'I don't have access to billing details, "
-            "but I can connect you with an agent who can help — would you like me to transfer you?' and call escalate_to_agent if they agree.\n"
-            "- If a tool call fails, acknowledge it calmly: 'I wasn't able to retrieve that — let me try another way.'\n"
-            "- EXIT this phase once you have reported all status information."
-        ),
-        ConvPhase.RESOLVE: (
-            "## Resolution Phase\n"
-            + _account_context
-            + "- The caller has already heard the status report from the previous phase. DO NOT repeat it. "
-            "Focus ONLY on what action is being taken or what the caller should expect.\n"
-            "- If a service incident is active and no ticket is needed: "
-            "tell the caller what to expect next, e.g. 'Our engineering team has an estimated fix in about two hours — "
-            "you should be back online by then. No action is needed from your end.' "
-            "Then call phase_complete.\n"
-            "- If the issue needs a new support ticket: use create_ticket (CONFIRMATION FIRST — confirm issue summary before calling; "
-            "read back ticket_id immediately after: 'Your ticket number is [ticket_id] — our team will follow up.'). "
-            "Then call phase_complete.\n"
-            "- If the caller wants to update an existing ticket (cancel, mark resolved, change priority): use update_ticket "
-            "(CONFIRMATION FIRST — confirm the change before calling; confirm back after: 'Done, your ticket is now [status].'). "
-            "Then call phase_complete.\n"
-            "- If no tool action is needed: state what happens next clearly and IMMEDIATELY call phase_complete.\n"
-            "- DO NOT mention or estimate billing amounts, charges, or account balances — you do not have that data.\n"
-            "- If the caller asks about billing: 'I don't have access to billing details, "
-            "but I can connect you with an agent who can help — would you like me to transfer you?'\n"
-            "- create_ticket: confirm issue summary first. "
-            "After the tool succeeds, IMMEDIATELY read back: 'Your ticket number is [ticket_id] — our team will follow up.' "
-            "Never say you cannot retrieve the ticket number — you already have it from the tool response.\n"
-            "- escalate_to_agent: you MUST call the tool — do NOT just say you will transfer the customer.\n"
-            "  If urgent (repeated frustration, explicit demand), call without pre-confirmation.\n"
-            "  Otherwise confirm first: 'Let me connect you with an agent — is that okay?'\n"
-            "- If a tool call fails: tell the customer and offer an alternative.\n"
-            "- Once the resolution is stated or the action is taken, call phase_complete to move to WRAP_UP. "
-            "Do NOT ask 'Is there anything else?' in this phase — that question belongs in WRAP_UP."
-        ),
+        ConvPhase.DIAGNOSE: _diagnose_instructions(service_category, _account_context),
+        ConvPhase.RESOLVE: _resolve_instructions(service_category, _account_context),
         ConvPhase.WRAP_UP: (
             "## Wrap-Up Phase\n"
             + _account_context
@@ -501,9 +994,14 @@ def build(
             "- Sample: 'Is there anything else I can help you with today?'\n"
             "- If the caller has NO further questions: thank them and say goodbye, then call phase_complete.\n"
             "  Sample: 'Great, I'm glad I could help. Have a wonderful day — goodbye!'\n"
-            "- If the caller HAS another issue: handle it using the available tools (lookup_customer, "
-            "get_service_status, get_ticket, get_account_history, create_ticket, update_ticket), "
-            "then call phase_complete when that issue is also resolved.\n"
+            "- If the caller HAS another question or issue: answer it using the available tools, "
+            "then ask 'Is there anything else?' again before calling phase_complete.\n"
+            "  Tool guidance for common follow-up requests:\n"
+            "  * 'What tickets / open tickets do I have?' → call get_service_status; report the open_support_tickets list.\n"
+            "    Do NOT call get_ticket — it requires a specific ticket ID and is only for direct ticket lookup.\n"
+            "  * Caller quotes a specific ticket number → call get_ticket with that ticket_id.\n"
+            "  * Caller asks about past issues → call get_account_history.\n"
+            "  * Caller wants to create a ticket → call create_ticket (confirm summary first).\n"
             "- Keep this phase brief — 2–3 exchanges maximum before calling phase_complete.\n"
             "- Do NOT call phase_complete before confirming the caller has no further questions."
         ),
@@ -512,9 +1010,11 @@ def build(
     return {
         "model": s.openai_model,
         "voice": s.openai_voice,
-        "instructions": _base_instructions(phase_instructions),
-        "tools": _tools_for_phase(phase, known_caller=known_caller),
-        "tool_choice": "auto",
+        "instructions": _base_instructions(phase_instructions, service_category=service_category),
+        "tools": _tools_for_phase(phase, known_caller=known_caller, service_category=service_category),
+        # TRIAGE: force a function call in every response. The only available tool is
+        # phase_complete, so the model MUST call it and cannot generate speech-only turns.
+        "tool_choice": "required" if phase == ConvPhase.TRIAGE else "auto",
         "input_audio_format": "pcm16",
         "output_audio_format": "pcm16",
         "input_audio_transcription": {"model": "whisper-1"},

@@ -7,6 +7,18 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+# ── Service category constants ────────────────────────────────────────────────
+
+SERVICE_CATEGORIES = frozenset({
+    "technical_support",
+    "billing",
+    "sales",
+    "move_transfer",
+    "appointment",
+    "account",
+})
+
+
 # ── Enumerations ─────────────────────────────────────────────────────────────
 
 class CallState(str, Enum):
@@ -105,6 +117,7 @@ class Call(BaseModel):
     escalated: bool = False
     frustration_count: int = 0
     tool_failure_count: int = 0
+    service_category: str | None = None  # Set by TRIAGE via phase_complete(service_category=...)
     token_total: TokenAggregate = Field(default_factory=lambda: TokenAggregate(scope=""))
 
     def model_post_init(self, __context: Any) -> None:

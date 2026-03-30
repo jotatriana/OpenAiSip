@@ -374,7 +374,11 @@ class StateStore:
                     repository.get_call_events(call.call_id, limit=t_limit),
                 )
                 return call.call_id, transcript, events
-            except Exception:
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to fetch transcript/events for %s: %s", call.call_id, exc, exc_info=True
+                )
                 return call.call_id, [], []
 
         results = await asyncio.gather(*[_fetch(c) for c in recent_calls])

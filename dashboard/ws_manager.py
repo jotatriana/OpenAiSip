@@ -54,10 +54,12 @@ class WSManager:
     async def connect(self, websocket: WebSocket) -> None:
         """Accept and register a new dashboard WebSocket connection."""
         await websocket.accept()
-        async with self._lock:
-            self._connections.add(websocket)
 
-        # Send snapshot of current state
+        # Build and send the snapshot BEFORE registering in _connections.
+        # If we register first, the broadcast loop starts delivering live events
+        # (CALL_EVENT, TRANSCRIPT_TURN) to the client before the snapshot arrives.
+        # The JS SNAPSHOT handler then replaces those early events, causing data loss.
+        # Sending first means the client receives a clean baseline before any live events.
         s = get_settings()
         try:
             snapshot = await store.snapshot(s.sip_stale_threshold_seconds)
@@ -67,6 +69,10 @@ class WSManager:
             )
         except Exception as exc:
             log.warning("Failed to send snapshot: %s", exc)
+
+        # Register after snapshot is delivered — live events flow from this point on
+        async with self._lock:
+            self._connections.add(websocket)
 
     async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:

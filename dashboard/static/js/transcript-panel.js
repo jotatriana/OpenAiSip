@@ -49,7 +49,13 @@ class TranscriptPanel {
           turns.forEach(t => map.set(t.turn_index, t));
         }
         for (const [cid, evts] of Object.entries(events)) {
-          this._events.set(cid, [...evts]);
+          // Merge snapshot events with any live events that arrived before the snapshot.
+          // Snapshot events have a DB `id`; live CALL_EVENT bus events don't.
+          // Preserve live-only events so they aren't lost when the snapshot lands.
+          const existing = this._events.get(cid) || [];
+          const snapshotDbIds = new Set(evts.filter(e => e.id != null).map(e => String(e.id)));
+          const liveOnly = existing.filter(e => e.id == null);
+          this._events.set(cid, [...evts, ...liveOnly]);
         }
         (msg.payload.active_calls || []).forEach(c => this._callMeta.set(c.call_id, c));
         this._syncSelector(msg.payload.active_calls || []);
@@ -191,6 +197,13 @@ class TranscriptPanel {
     if (current && [...this._selectorEl.options].some(o => o.value === current)) {
       this._selectorEl.value = current;
       this._selectedCallId = current;
+    } else if (!this._selectedCallId && activeCalls.length > 0) {
+      // No call is selected yet — auto-select the first live call so the operator
+      // sees the transcript immediately without having to touch the dropdown.
+      const live = activeCalls.find(c => ['ACTIVE', 'RINGING', 'TRANSFERRING'].includes(c.state));
+      const pick = live || activeCalls[0];
+      this._selectorEl.value = pick.call_id;
+      this._selectedCallId = pick.call_id;
     } else {
       this._selectedCallId = null;
     }

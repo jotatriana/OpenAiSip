@@ -559,6 +559,7 @@ def _cdr_to_dict(record: CallDetailRecord) -> dict:
         "account_id": record.account_id,
         "state": record.state,
         "phase_at_end": record.phase_at_end,
+        "service_category": record.service_category,
         "hangup_cause": record.hangup_cause,
         "escalated": bool(record.escalated),
         "frustration_count": record.frustration_count,
