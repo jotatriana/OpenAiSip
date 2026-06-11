@@ -340,7 +340,31 @@ pytest tests/test_scenarios.py -v   # scenario tests only
 pytest --cov=sip_bridge --cov=core --cov=db --cov-report=term-missing
 ```
 
-**216 tests** across unit tests and 16 end-to-end scenario tests. CI runs automatically on push/PR via GitHub Actions.
+**218 tests** across unit tests and 16 end-to-end scenario tests. CI runs automatically on push/PR via GitHub Actions.
+
+## Security
+
+A full OWASP Top 10 (2025) audit was conducted on 2026-06-08. The report and automated scanner output are in `audit/2026-06-08/`. Summary:
+
+| Finding | Severity | Status |
+|---|---|---|
+| SEV-001: Stored XSS in calls table via SIP `From` header | High | ✅ Fixed — `_esc()` wraps all dynamic fields in `calls-panel.js` |
+| SEV-002: Webhook replay — no timestamp validation | Medium | ✅ Fixed — ±5-minute freshness check in `webhook_handler.py` |
+| SEV-003: Unpinned dependencies / no lockfile | Medium | ⚠️ Partial — `idna`, `mako`, `python-dotenv`, `pytest` patched; `starlette`/`fastapi` major bump pending; lockfile not yet committed |
+| SEV-004: Webhook verification fails open when secret is empty | Low | ✅ Fixed — raises `HTTP 500` if `WEBHOOK_SECRET` is unset |
+| SEV-005: Non-constant-time API-key comparison | Low | ✅ Fixed — `hmac.compare_digest` used in `dashboard/auth.py` |
+| SEV-006: Dashboard served over plain HTTP, bound to all interfaces | Low | ⚠️ Open — use a TLS-terminating reverse proxy in production; bind dashboard to `127.0.0.1` |
+| SEV-007: `ngrok.yml` not git-ignored | Low | ✅ Fixed — added to `.gitignore` |
+| SEV-008: Verbose exception text surfaced to model/logs | Info | ⚠️ Open — low risk; tighten in a future pass |
+| SEV-009: Best-effort-only PCI/PII scrubbing in transcripts | Info | ⚠️ Open — production deployments should use a certified PII service and encrypt the transcript store at rest |
+
+### Production deployment checklist
+
+- Set `WEBHOOK_SECRET` (required — server rejects requests if unset)
+- Terminate TLS in front of both services with a reverse proxy (nginx, Caddy, etc.)
+- Bind the dashboard (`port 8001`) to `127.0.0.1` or a private interface; only the SIP webhook (`port 8000`) needs to be public
+- Run `pip-audit` and pin exact dependency versions with a lockfile (`pip-compile` or `uv`) before deploying
+- Rotate any `ngrok.yml` authtoken that may have existed before the file was git-ignored
 
 ## Health Check
 

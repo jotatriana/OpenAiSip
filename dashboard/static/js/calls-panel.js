@@ -31,14 +31,26 @@ class CallsPanel {
 
     this._tbody.innerHTML = calls.map(c => `
       <tr>
-        <td><code>${c.call_id.slice(0, 12)}…</code></td>
+        <td><code>${this._esc(c.call_id.slice(0, 12))}…</code></td>
         <td>${this._formatDateTime(c.created_at)}</td>
-        <td>${this._formatUri(c.from_uri)}</td>
-        <td><span class="call-state call-state--${c.state.toLowerCase()}">${c.state}</span></td>
-        <td>${c.phase}</td>
+        <td>${this._esc(this._formatUri(c.from_uri))}</td>
+        <td><span class="call-state call-state--${this._esc(c.state.toLowerCase())}">${this._esc(c.state)}</span></td>
+        <td>${this._esc(c.phase)}</td>
         <td>${this._formatDuration(c)}</td>
       </tr>
     `).join('');
+  }
+
+  // Escape untrusted values before interpolating into innerHTML. `from_uri`
+  // originates from the caller-controlled SIP `From` header, so it must never
+  // be inserted raw (stored XSS in the operator dashboard otherwise).
+  _esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   _formatUri(uri) {

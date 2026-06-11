@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import logging
 import re
+import time
 
 from fastapi import HTTPException, Request
 
@@ -217,6 +218,27 @@ async def _accept_call(call_id: str) -> None:
             await bus.publish(Topic.CALL_ENDED, call.model_dump(mode="json"))
 
 
+def _verify_timestamp(webhook_ts: str, tolerance_seconds: int) -> None:
+    """Reject webhooks whose timestamp is missing or outside the tolerance window.
+
+    The Svix scheme signs the timestamp specifically to enable replay protection;
+    bounding its age (and rejecting far-future values) closes the replay window.
+    """
+    try:
+        ts = int(webhook_ts)
+    except (TypeError, ValueError):
+        log.warning("Missing or non-numeric webhook-timestamp: %r", webhook_ts)
+        raise HTTPException(status_code=401, detail="Invalid signature timestamp")
+
+    age = abs(int(time.time()) - ts)
+    if age > tolerance_seconds:
+        log.warning(
+            "Webhook timestamp outside tolerance (%ds > %ds) — possible replay",
+            age, tolerance_seconds,
+        )
+        raise HTTPException(status_code=401, detail="Signature timestamp out of range")
+
+
 def _verify_signature(request: Request, body: bytes) -> None:
     """Verify Svix webhook signature used by OpenAI.
 
@@ -227,7 +249,16 @@ def _verify_signature(request: Request, body: bytes) -> None:
     """
     s = get_settings()
     if not s.webhook_secret:
-        return  # Skip validation if no secret configured
+        # Fail closed: a missing secret must not silently disable verification on
+        # a public endpoint. Only skip when explicitly opted in for development.
+        if s.allow_unsigned_webhooks:
+            log.warning(
+                "WEBHOOK_SECRET is empty and ALLOW_UNSIGNED_WEBHOOKS is enabled — "
+                "accepting webhook WITHOUT signature verification (development only)."
+            )
+            return
+        log.error("WEBHOOK_SECRET is not configured — rejecting webhook (fail closed).")
+        raise HTTPException(status_code=500, detail="Webhook verification not configured")
 
     webhook_id = request.headers.get("webhook-id", "")
     webhook_ts = request.headers.get("webhook-timestamp", "")
@@ -236,6 +267,10 @@ def _verify_signature(request: Request, body: bytes) -> None:
     if not sig_header:
         log.warning("Missing webhook-signature header")
         raise HTTPException(status_code=401, detail="Missing signature")
+
+    # Reject stale/forged timestamps before checking the signature. The signature
+    # covers the timestamp, so a valid signature on an old timestamp is a replay.
+    _verify_timestamp(webhook_ts, s.webhook_tolerance_seconds)
 
     # Decode the secret (strip optional whsec_ prefix, then base64-decode)
     secret = s.webhook_secret

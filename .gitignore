@@ -77,6 +77,9 @@ out/
 .env.production.local
 *.env
 
+# Secrets / local service config (contains ngrok authtoken)
+ngrok.yml
+
 # IDE
 .vscode/
 .idea/

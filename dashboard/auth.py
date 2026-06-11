@@ -1,6 +1,8 @@
 """Bearer token authentication dependency for dashboard routes and WebSocket."""
 from __future__ import annotations
 
+import hmac
+
 from fastapi import Depends, HTTPException, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -9,11 +11,21 @@ from config.settings import get_settings
 _bearer = HTTPBearer(auto_error=False)
 
 
+def _key_matches(provided: str, expected: str) -> bool:
+    """Constant-time comparison of the API key.
+
+    Using ``==``/``!=`` short-circuits on the first differing byte, which can
+    leak the expected key via response-timing analysis. ``hmac.compare_digest``
+    runs in time independent of how many leading bytes match.
+    """
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
 async def require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
     s = get_settings()
-    if credentials is None or credentials.credentials != s.dashboard_api_key:
+    if credentials is None or not _key_matches(credentials.credentials, s.dashboard_api_key):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return credentials.credentials
 
@@ -39,7 +51,7 @@ async def ws_require_auth(websocket: WebSocket) -> bool:
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
 
-    if token != s.dashboard_api_key:
+    if not _key_matches(token, s.dashboard_api_key):
         await websocket.accept()
         await websocket.close(code=4001, reason="Authentication failed")
         return False

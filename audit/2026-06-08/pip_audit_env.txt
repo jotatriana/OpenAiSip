@@ -1,0 +1,16 @@
+Found 13 known vulnerabilities in 4 packages
+Name      Version ID             Fix Versions
+--------- ------- -------------- ------------
+pillow    12.1.1  PYSEC-2026-165 12.2.0
+pillow    12.1.1  CVE-2026-40192 12.2.0
+pillow    12.1.1  CVE-2026-42309 12.2.0
+pillow    12.1.1  CVE-2026-42310 12.2.0
+pillow    12.1.1  CVE-2026-42311 12.2.0
+pip       24.0    PYSEC-2026-196 26.1.2
+pip       24.0    CVE-2025-8869  25.3
+pip       24.0    CVE-2026-1703  26.0
+pip       24.0    CVE-2026-3219  26.1
+pip       24.0    CVE-2026-6357  26.1
+pygments  2.19.2  CVE-2026-4539  2.20.0
+starlette 0.52.1  PYSEC-2026-161 1.0.1
+starlette 0.52.1  PYSEC-2026-161 1.0.1

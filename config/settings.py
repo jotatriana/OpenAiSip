@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     webhook_secret: str
     webhook_listen_host: str = "0.0.0.0"
     webhook_listen_port: int = 8000
+    # Webhook signature verification
+    webhook_tolerance_seconds: int = 300   # reject timestamps older/newer than this (replay protection)
+    allow_unsigned_webhooks: bool = False  # dev only: accept webhooks when no secret is configured
 
     # Conversation behavior
     default_language: str = "en-US"

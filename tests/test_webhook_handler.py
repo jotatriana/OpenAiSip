@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import time
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -9,12 +10,15 @@ from fastapi.testclient import TestClient
 from sip_bridge.app import app
 
 
-def _make_svix_sig(body: bytes, secret_bytes: bytes, webhook_id: str = "wh_123", timestamp: str = "1234567890") -> dict:
+def _make_svix_sig(body: bytes, secret_bytes: bytes, webhook_id: str = "wh_123", timestamp: str | None = None) -> dict:
     """Build Svix-style webhook headers with a valid HMAC-SHA256 signature.
 
     secret_bytes must be the raw key bytes (same as base64.b64decode(whsec_part)).
+    Defaults to the current time so the timestamp passes replay-protection checks.
     """
     import base64
+    if timestamp is None:
+        timestamp = str(int(time.time()))
     signed_content = f"{webhook_id}.{timestamp}.".encode() + body
     sig = base64.b64encode(
         hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
@@ -63,6 +67,8 @@ def test_webhook_valid_signature(client):
          patch("sip_bridge.webhook_handler.store") as mock_store, \
          patch("sip_bridge.webhook_handler.bus") as mock_bus:
         mock_s.return_value.webhook_secret = whsec
+        mock_s.return_value.webhook_tolerance_seconds = 300
+        mock_s.return_value.allow_unsigned_webhooks = False
         mock_store.create_call = AsyncMock()
         mock_bus.publish = AsyncMock()
         resp = client.post(
@@ -73,13 +79,46 @@ def test_webhook_valid_signature(client):
         assert resp.json() == {"status": "ok"}
 
 
-def test_webhook_no_secret_skips_validation(client):
+def test_webhook_stale_timestamp_rejected(client):
+    """A validly-signed but old timestamp is a replay and must be rejected."""
+    import base64
+    raw_key = b"supersecretkey32byteslong!!!!!"
+    whsec = "whsec_" + base64.b64encode(raw_key).decode()
+    body = json.dumps(PAYLOAD).encode()
+    # Sign with a timestamp well outside the tolerance window (1 hour ago).
+    stale = str(int(time.time()) - 3600)
+    svix_headers = _make_svix_sig(body, raw_key, timestamp=stale)
+    with patch("sip_bridge.webhook_handler.get_settings") as mock_s:
+        mock_s.return_value.webhook_secret = whsec
+        mock_s.return_value.webhook_tolerance_seconds = 300
+        mock_s.return_value.allow_unsigned_webhooks = False
+        resp = client.post(
+            "/webhooks/sip", content=body,
+            headers={"Content-Type": "application/json", **svix_headers},
+        )
+        assert resp.status_code == 401
+
+
+def test_webhook_no_secret_fails_closed(client):
+    """With no secret and no opt-in, verification must fail closed (not accept)."""
+    body = json.dumps(PAYLOAD).encode()
+    with patch("sip_bridge.webhook_handler.get_settings") as mock_s:
+        mock_s.return_value.webhook_secret = ""
+        mock_s.return_value.allow_unsigned_webhooks = False
+        resp = client.post("/webhooks/sip", content=body,
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 500
+
+
+def test_webhook_no_secret_allow_unsigned_opt_in(client):
+    """ALLOW_UNSIGNED_WEBHOOKS lets development skip verification explicitly."""
     body = json.dumps(PAYLOAD).encode()
     with patch("sip_bridge.webhook_handler.get_settings") as mock_s, \
          patch("sip_bridge.webhook_handler._accept_call", new_callable=AsyncMock), \
          patch("sip_bridge.webhook_handler.store") as mock_store, \
          patch("sip_bridge.webhook_handler.bus") as mock_bus:
         mock_s.return_value.webhook_secret = ""
+        mock_s.return_value.allow_unsigned_webhooks = True
         mock_store.create_call = AsyncMock()
         mock_bus.publish = AsyncMock()
         resp = client.post("/webhooks/sip", content=body,
