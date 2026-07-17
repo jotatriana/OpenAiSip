@@ -91,21 +91,21 @@ The category is validated against `SERVICE_CATEGORIES` in `core/models.py` and w
 | `get_account_history` | DIAGNOSE onward | technical_support | Return resolved tickets + incidents for repeat-caller context |
 | `create_ticket` | DIAGNOSE onward | technical_support | Open a support ticket |
 | `update_ticket` | RESOLVE onward | technical_support | Change an existing ticket's status or priority |
-| `get_account_balance` | DIAGNOSE onward | billing | v1 stub — returns feature_pending, escalates to agent |
-| `get_payment_history` | DIAGNOSE onward | billing | v1 stub — returns feature_pending, escalates to agent |
+| `get_account_balance` | DIAGNOSE onward | billing | Mock-data-backed — returns balance, minimum payment due, due date, last payment (`billing_accounts`/`payments` tables) |
+| `get_payment_history` | DIAGNOSE onward | billing | Mock-data-backed — recent payments for the account (`payments` table) |
 | `make_payment` | RESOLVE onward | billing | v1 stub — returns feature_pending, escalates to agent |
 | `setup_autopay` | RESOLVE onward | billing | v1 stub — returns feature_pending, escalates to agent |
-| `get_product_catalog` | DIAGNOSE onward | sales | v1 stub — returns feature_pending, escalates to agent |
-| `get_promotions` | DIAGNOSE onward | sales | v1 stub — returns feature_pending, escalates to agent |
+| `get_product_catalog` | DIAGNOSE onward | sales | Mock-data-backed — global plan catalog filtered by account_type when account_id is given (`products` table) |
+| `get_promotions` | DIAGNOSE onward | sales | Mock-data-backed — promotions filtered by account_type (`promotions` table) |
 | `initiate_upgrade` | RESOLVE onward | sales | v1 stub — returns feature_pending, escalates to agent |
-| `get_service_eligibility` | DIAGNOSE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
+| `get_service_eligibility` | DIAGNOSE onward | move_transfer | Mock-data-backed — zip-prefix lookup against `service_areas`; falls back to "eligible, standard plans" when the address doesn't match a seeded prefix |
 | `initiate_service_move` | RESOLVE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
 | `cancel_service` | RESOLVE onward | move_transfer | v1 stub — returns feature_pending, escalates to agent |
-| `get_appointments` | DIAGNOSE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
+| `get_appointments` | DIAGNOSE onward | appointment | Mock-data-backed — non-cancelled appointments for the account (`appointments` table) |
 | `confirm_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
 | `cancel_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
 | `reschedule_appointment` | RESOLVE onward | appointment | v1 stub — returns feature_pending, escalates to agent |
-| `get_account_details` | DIAGNOSE onward | account | v1 stub — returns feature_pending, escalates to agent |
+| `get_account_details` | DIAGNOSE onward | account | Mock-data-backed — extends `Customer` with `mailing_address`/`preferred_contact_method` |
 | `update_contact_info` | RESOLVE onward | account | v1 stub — returns feature_pending, escalates to agent |
 
 Tool calls are handled by `ToolExecutor` in this exact sequence:
@@ -247,16 +247,22 @@ SQLite by default (`openaisip.db`); configurable to PostgreSQL via `DATABASE_URL
 
 | Table | Purpose |
 |---|---|
-| `customers` | Account records |
+| `customers` | Account records; includes `mailing_address` (nullable) and `preferred_contact_method` |
 | `services` | Per-customer service subscriptions |
 | `service_incidents` | Open/historical network outages — returned as `open_incidents` by `get_service_status` |
 | `support_tickets` | Customer-specific tickets created via `create_ticket` — also returned as `open_support_tickets` by `get_service_status` |
+| `billing_accounts` | Current balance/minimum payment/due date per account — read by `get_account_balance` |
+| `payments` | Historical payments (masked `method` string, never a real card number) — read by `get_payment_history` and `get_account_balance`'s last-payment field |
+| `products` | Global service plan catalog, not customer-specific — read by `get_product_catalog` |
+| `promotions` | Promotional offers filtered by `account_type` — read by `get_promotions` |
+| `service_areas` | Mock service-availability lookup keyed by a 3-digit zip/postal prefix — read by `get_service_eligibility` |
+| `appointments` | Scheduled technician visits — read by `get_appointments` |
 | `call_transcripts` | Per-turn transcript (PCI-scrubbed, retained `TRANSCRIPT_RETENTION_DAYS`) |
 | `call_events` | Append-only event timeline per call (phase changes, tool calls, WS events) |
 | `call_detail_records` | CDR snapshot written at call end (billing fields, token counts, cost); includes nullable `service_category TEXT` column |
 | `escalation_contexts` | Warm handoff packet written when `escalate_to_agent` fires; read by agent desktop |
 
-Seed data (15 customers) loads on startup.
+Seed data (15 customers, plus billing/product/promotion/service-area/appointment mock data) loads on startup. Anyone with an already-seeded local `openaisip.db` from before these tables existed needs `python -m db.seed --reset` to pick them up — the seed idempotency check only looks at whether `ACC-JT001` exists.
 
 **Datetime serialization note:** SQLite stores datetimes without timezone info. `_cdr_to_dict()` in `repository.py` uses `_dt_utc()` to append `Z` to all naive datetime strings before returning them via the API or loading them into `StateStore`. This ensures JavaScript always interprets them as UTC regardless of browser timezone, preventing incorrect duration calculations for operators in non-UTC timezones.
 

@@ -18,6 +18,8 @@ class Customer(Base):
     email: Mapped[str | None] = mapped_column(String, nullable=True)
     account_type: Mapped[str] = mapped_column(String, default="residential")  # residential | business
     account_status: Mapped[str] = mapped_column(String, default="active")     # active | suspended | cancelled
+    mailing_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    preferred_contact_method: Mapped[str] = mapped_column(String, default="phone")  # phone | email | sms
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -173,3 +175,70 @@ class CallDetailRecord(Base):
     answered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BillingAccount(Base):
+    """Current billing snapshot for a customer — one row per account."""
+    __tablename__ = "billing_accounts"
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("customers.account_id"), primary_key=True)
+    balance: Mapped[float] = mapped_column(Float, default=0.0)
+    minimum_payment_due: Mapped[float] = mapped_column(Float, default=0.0)
+    due_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class Payment(Base):
+    """A single historical payment. method is a masked display string, never a real card number."""
+    __tablename__ = "payments"
+
+    payment_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("customers.account_id"), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    method: Mapped[str] = mapped_column(String, nullable=False)   # e.g. "Visa ····4432"
+    status: Mapped[str] = mapped_column(String, default="completed")
+    paid_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class Product(Base):
+    """Global service plan catalog — not customer-specific."""
+    __tablename__ = "products"
+
+    product_id: Mapped[str] = mapped_column(String, primary_key=True)   # e.g. PLAN-INT-100
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)       # internet | tv | phone | mobile | bundle
+    price_monthly: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    account_type: Mapped[str] = mapped_column(String, default="both")   # residential | business | both
+
+
+class Promotion(Base):
+    """Active promotional offers, filtered by account_type when presented to a caller."""
+    __tablename__ = "promotions"
+
+    promotion_id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    account_type: Mapped[str] = mapped_column(String, default="both")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ServiceArea(Base):
+    """Mock service-availability lookup, keyed by a zip/postal prefix extracted from the caller's address."""
+    __tablename__ = "service_areas"
+
+    zip_prefix: Mapped[str] = mapped_column(String, primary_key=True)   # e.g. "900"
+    eligible: Mapped[int] = mapped_column(Integer, default=1)           # 0/1 bool
+    available_plans: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON list of product_ids
+    estimated_install_days: Mapped[int] = mapped_column(Integer, default=5)
+
+
+class Appointment(Base):
+    """A scheduled technician visit."""
+    __tablename__ = "appointments"
+
+    appointment_id: Mapped[str] = mapped_column(String, primary_key=True)   # e.g. APT-00000001
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("customers.account_id"), nullable=False)
+    scheduled_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    time_window: Mapped[str] = mapped_column(String, nullable=False)        # e.g. "10am-12pm"
+    appointment_type: Mapped[str] = mapped_column(String, nullable=False)   # installation | repair | upgrade
+    status: Mapped[str] = mapped_column(String, default="scheduled")        # scheduled | confirmed | completed | cancelled

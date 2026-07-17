@@ -552,12 +552,27 @@ async def _dispatch(tool_name: str, args: dict, call_id: str = "") -> Any:
         return await _get_account_history(args["account_id"])
     elif tool_name == "escalate_to_agent":
         return await _escalate_to_agent(call_id, args.get("reason", ""))
+    # Read-only tools backed by mock data (see db/seed.py) — real implementations.
+    elif tool_name == "get_account_balance":
+        return await _get_billing_account(args["account_id"])
+    elif tool_name == "get_payment_history":
+        return await _get_payment_history(args["account_id"])
+    elif tool_name == "get_product_catalog":
+        return await _get_product_catalog(args.get("account_id", ""))
+    elif tool_name == "get_promotions":
+        return await _get_promotions(args["account_id"])
+    elif tool_name == "get_service_eligibility":
+        return await _get_service_eligibility(args["address"])
+    elif tool_name == "get_appointments":
+        return await _get_appointments(args["account_id"])
+    elif tool_name == "get_account_details":
+        return await _get_account_details(args["account_id"])
+    # Write/action tools — still v1 stubs, route to a live agent.
     elif tool_name in (
-        "get_product_catalog", "get_promotions", "initiate_upgrade",
-        "get_account_balance", "get_payment_history", "make_payment", "setup_autopay",
-        "get_service_eligibility", "initiate_service_move", "cancel_service",
-        "get_appointments", "confirm_appointment", "cancel_appointment", "reschedule_appointment",
-        "get_account_details", "update_contact_info",
+        "initiate_upgrade", "make_payment", "setup_autopay",
+        "initiate_service_move", "cancel_service",
+        "confirm_appointment", "cancel_appointment", "reschedule_appointment",
+        "update_contact_info",
     ):
         return _stub_tool(tool_name)
     else:
@@ -610,6 +625,41 @@ async def _update_ticket(ticket_id: str, status: str | None, priority: str | Non
 async def _get_account_history(account_id: str) -> dict:
     from db import repository
     return await repository.get_account_history(account_id)
+
+
+async def _get_billing_account(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_billing_account(account_id)
+
+
+async def _get_payment_history(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_payment_history(account_id)
+
+
+async def _get_product_catalog(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_product_catalog(account_id)
+
+
+async def _get_promotions(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_promotions(account_id)
+
+
+async def _get_service_eligibility(address: str) -> dict:
+    from db import repository
+    return await repository.get_service_eligibility(address)
+
+
+async def _get_appointments(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_appointments(account_id)
+
+
+async def _get_account_details(account_id: str) -> dict:
+    from db import repository
+    return await repository.get_account_details(account_id)
 
 
 async def _escalate_to_agent(call_id: str, reason: str) -> dict:

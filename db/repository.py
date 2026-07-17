@@ -11,7 +11,21 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from db.engine import AsyncSessionLocal
-from db.models import CallDetailRecord, CallEvent, CallTranscript, Customer, EscalationContext, ServiceIncident, SupportTicket
+from db.models import (
+    Appointment,
+    BillingAccount,
+    CallDetailRecord,
+    CallEvent,
+    CallTranscript,
+    Customer,
+    EscalationContext,
+    Payment,
+    Product,
+    Promotion,
+    ServiceArea,
+    ServiceIncident,
+    SupportTicket,
+)
 
 # ── Call event type constants ──────────────────────────────────────────────────
 EVENT_CALL_CREATED = "call_created"
@@ -415,6 +429,192 @@ async def get_account_history(account_id: str, limit: int = 10) -> dict:
             "account_id": account_id,
             "resolved_tickets": resolved_tickets,
             "resolved_incidents": resolved_incidents,
+        }
+
+
+async def get_billing_account(account_id: str) -> dict:
+    """Return current balance, minimum payment due, due date, and last payment for an account."""
+    async with AsyncSessionLocal() as session:
+        customer = await session.get(Customer, account_id)
+        if customer is None:
+            return {"status": "error", "message": f"Account {account_id} not found"}
+        billing = await session.get(BillingAccount, account_id)
+        if billing is None:
+            return {"status": "error", "message": f"No billing account on file for {account_id}"}
+
+        last_stmt = (
+            select(Payment)
+            .where(Payment.account_id == account_id)
+            .order_by(Payment.paid_at.desc())
+            .limit(1)
+        )
+        last_result = await session.execute(last_stmt)
+        last = last_result.scalar_one_or_none()
+
+        return {
+            "account_id": account_id,
+            "balance": billing.balance,
+            "minimum_payment_due": billing.minimum_payment_due,
+            "due_date": billing.due_date.date().isoformat(),
+            "last_payment": (
+                {"amount": last.amount, "date": last.paid_at.date().isoformat(), "method": last.method}
+                if last else None
+            ),
+        }
+
+
+async def get_payment_history(account_id: str, limit: int = 10) -> dict:
+    """Return recent payment history for an account."""
+    async with AsyncSessionLocal() as session:
+        customer = await session.get(Customer, account_id)
+        if customer is None:
+            return {"status": "error", "message": f"Account {account_id} not found"}
+
+        stmt = (
+            select(Payment)
+            .where(Payment.account_id == account_id)
+            .order_by(Payment.paid_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        payments = [
+            {
+                "amount": p.amount,
+                "date": p.paid_at.date().isoformat(),
+                "method": p.method,
+                "status": p.status,
+            }
+            for p in result.scalars().all()
+        ]
+        return {"account_id": account_id, "payments": payments}
+
+
+async def get_product_catalog(account_id: str = "") -> dict:
+    """Return the service plan catalog, filtered by the account's type when account_id is given."""
+    async with AsyncSessionLocal() as session:
+        account_type = None
+        if account_id:
+            customer = await session.get(Customer, account_id)
+            if customer is not None:
+                account_type = customer.account_type
+
+        stmt = select(Product)
+        if account_type:
+            from sqlalchemy import or_
+            stmt = stmt.where(or_(Product.account_type == account_type, Product.account_type == "both"))
+        result = await session.execute(stmt)
+        products = [
+            {
+                "product_id": p.product_id,
+                "name": p.name,
+                "category": p.category,
+                "price_monthly": p.price_monthly,
+                "description": p.description,
+            }
+            for p in result.scalars().all()
+        ]
+        return {"products": products}
+
+
+async def get_promotions(account_id: str) -> dict:
+    """Return promotions eligible for the account's type."""
+    async with AsyncSessionLocal() as session:
+        customer = await session.get(Customer, account_id)
+        if customer is None:
+            return {"status": "error", "message": f"Account {account_id} not found"}
+
+        from sqlalchemy import or_
+        stmt = select(Promotion).where(
+            or_(Promotion.account_type == customer.account_type, Promotion.account_type == "both")
+        )
+        result = await session.execute(stmt)
+        promotions = [
+            {
+                "promotion_id": pr.promotion_id,
+                "title": pr.title,
+                "description": pr.description,
+                "expires_at": pr.expires_at.date().isoformat() if pr.expires_at else None,
+            }
+            for pr in result.scalars().all()
+        ]
+        return {"account_id": account_id, "promotions": promotions}
+
+
+_ZIP_RE = re.compile(r'\b(\d{5})\b')
+_DEFAULT_ELIGIBLE_PLANS = ["PLAN-INT-100", "PLAN-INT-500"]
+
+
+def _extract_zip_prefix(address: str) -> str | None:
+    """Pull a 3-digit zip/postal prefix out of a free-text address for the mock eligibility lookup."""
+    m = _ZIP_RE.search(address)
+    return m.group(1)[:3] if m else None
+
+
+async def get_service_eligibility(address: str) -> dict:
+    """Mock service-availability check for a caller-provided address.
+
+    Falls back to 'eligible with standard plans' when the address doesn't match a
+    known zip prefix — there is no exhaustive real address coverage dataset here.
+    """
+    prefix = _extract_zip_prefix(address)
+    async with AsyncSessionLocal() as session:
+        area = await session.get(ServiceArea, prefix) if prefix else None
+        if area is None:
+            return {
+                "address": address,
+                "eligible": True,
+                "available_plans": _DEFAULT_ELIGIBLE_PLANS,
+                "estimated_install_days": 5,
+            }
+        return {
+            "address": address,
+            "eligible": bool(area.eligible),
+            "available_plans": json.loads(area.available_plans) if area.eligible else [],
+            "estimated_install_days": area.estimated_install_days,
+        }
+
+
+async def get_appointments(account_id: str) -> dict:
+    """Return upcoming (non-cancelled) technician appointments for an account."""
+    async with AsyncSessionLocal() as session:
+        customer = await session.get(Customer, account_id)
+        if customer is None:
+            return {"status": "error", "message": f"Account {account_id} not found"}
+
+        stmt = (
+            select(Appointment)
+            .where(Appointment.account_id == account_id, Appointment.status != "cancelled")
+            .order_by(Appointment.scheduled_date)
+        )
+        result = await session.execute(stmt)
+        appointments = [
+            {
+                "appointment_id": a.appointment_id,
+                "scheduled_date": a.scheduled_date.date().isoformat(),
+                "time_window": a.time_window,
+                "appointment_type": a.appointment_type,
+                "status": a.status,
+            }
+            for a in result.scalars().all()
+        ]
+        return {"account_id": account_id, "appointments": appointments}
+
+
+async def get_account_details(account_id: str) -> dict:
+    """Return full account profile: contact info, mailing address, and preferences."""
+    async with AsyncSessionLocal() as session:
+        customer = await session.get(Customer, account_id)
+        if customer is None:
+            return {"status": "error", "message": f"Account {account_id} not found"}
+        return {
+            "account_id": customer.account_id,
+            "full_name": customer.full_name,
+            "phone_number": customer.phone_number,
+            "email": customer.email or "",
+            "mailing_address": customer.mailing_address or "not on file",
+            "preferred_contact_method": customer.preferred_contact_method,
+            "account_type": customer.account_type,
+            "account_status": customer.account_status,
         }
 
 

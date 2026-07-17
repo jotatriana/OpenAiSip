@@ -330,6 +330,363 @@ async def test_get_account_history_unknown_account():
 
 
 # ---------------------------------------------------------------------------
+# get_billing_account
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_billing_account_returns_balance_and_last_payment():
+    """get_billing_account returns balance, minimum payment, due date, and the most recent payment."""
+    import uuid
+    from datetime import datetime
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer, BillingAccount, Payment
+    from db.repository import get_billing_account
+
+    await init_db()
+    account_id = f"ACC-BA{uuid.uuid4().hex[:4].upper()}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Billing User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}"))
+        session.add(BillingAccount(account_id=account_id, balance=99.50,
+                                   minimum_payment_due=30.00, due_date=datetime(2026, 8, 1)))
+        session.add(Payment(account_id=account_id, amount=50.00, method="Visa ····1111",
+                            paid_at=datetime(2026, 6, 1)))
+        session.add(Payment(account_id=account_id, amount=60.00, method="Visa ····1111",
+                            paid_at=datetime(2026, 7, 1)))
+        await session.commit()
+
+    result = await get_billing_account(account_id)
+    assert result["account_id"] == account_id
+    assert result["balance"] == 99.50
+    assert result["minimum_payment_due"] == 30.00
+    assert result["due_date"] == "2026-08-01"
+    assert result["last_payment"]["amount"] == 60.00  # most recent, not first inserted
+    assert result["last_payment"]["date"] == "2026-07-01"
+
+
+@pytest.mark.asyncio
+async def test_get_billing_account_unknown_account():
+    """get_billing_account returns an error dict for an unknown account."""
+    from db.engine import init_db
+    from db.repository import get_billing_account
+
+    await init_db()
+    result = await get_billing_account("ACC-DOESNOTEXIST")
+    assert result["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_get_billing_account_no_billing_record():
+    """get_billing_account returns an error dict when the customer has no billing_accounts row."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer
+    from db.repository import get_billing_account
+
+    await init_db()
+    account_id = f"ACC-NB{uuid.uuid4().hex[:4].upper()}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="No Billing User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}"))
+        await session.commit()
+
+    result = await get_billing_account(account_id)
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# get_payment_history
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_payment_history_returns_payments_desc():
+    """get_payment_history returns payments newest-first."""
+    import uuid
+    from datetime import datetime
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer, Payment
+    from db.repository import get_payment_history
+
+    await init_db()
+    account_id = f"ACC-PH{uuid.uuid4().hex[:4].upper()}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Payment User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}"))
+        session.add(Payment(account_id=account_id, amount=40.00, method="Amex ····9999",
+                            paid_at=datetime(2026, 5, 1)))
+        session.add(Payment(account_id=account_id, amount=45.00, method="Amex ····9999",
+                            paid_at=datetime(2026, 6, 1)))
+        await session.commit()
+
+    result = await get_payment_history(account_id)
+    assert result["account_id"] == account_id
+    assert len(result["payments"]) == 2
+    assert result["payments"][0]["amount"] == 45.00  # most recent first
+
+
+@pytest.mark.asyncio
+async def test_get_payment_history_unknown_account():
+    """get_payment_history returns an error dict for an unknown account."""
+    from db.engine import init_db
+    from db.repository import get_payment_history
+
+    await init_db()
+    result = await get_payment_history("ACC-DOESNOTEXIST")
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# get_product_catalog
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_product_catalog_filters_by_account_type():
+    """get_product_catalog excludes products for the other account_type, keeps 'both'."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer, Product
+    from db.repository import get_product_catalog
+
+    await init_db()
+    account_id = f"ACC-PC{uuid.uuid4().hex[:4].upper()}"
+    suffix = uuid.uuid4().hex[:6].upper()
+    residential_id = f"PLAN-RES-{suffix}"
+    business_id = f"PLAN-BIZ-{suffix}"
+    both_id = f"PLAN-ANY-{suffix}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Catalog User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}",
+                             account_type="residential"))
+        session.add(Product(product_id=residential_id, name="Residential Plan", category="internet",
+                            price_monthly=10.0, description="test", account_type="residential"))
+        session.add(Product(product_id=business_id, name="Business Plan", category="internet",
+                            price_monthly=10.0, description="test", account_type="business"))
+        session.add(Product(product_id=both_id, name="Any Plan", category="internet",
+                            price_monthly=10.0, description="test", account_type="both"))
+        await session.commit()
+
+    result = await get_product_catalog(account_id)
+    ids = {p["product_id"] for p in result["products"]}
+    assert residential_id in ids
+    assert both_id in ids
+    assert business_id not in ids
+
+
+@pytest.mark.asyncio
+async def test_get_product_catalog_no_account_id_returns_all():
+    """get_product_catalog with no account_id does not filter by account_type."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Product
+    from db.repository import get_product_catalog
+
+    await init_db()
+    suffix = uuid.uuid4().hex[:6].upper()
+    business_id = f"PLAN-BIZ-{suffix}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Product(product_id=business_id, name="Business Plan", category="internet",
+                            price_monthly=10.0, description="test", account_type="business"))
+        await session.commit()
+
+    result = await get_product_catalog()
+    ids = {p["product_id"] for p in result["products"]}
+    assert business_id in ids
+
+
+# ---------------------------------------------------------------------------
+# get_promotions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_promotions_filters_by_account_type():
+    """get_promotions excludes promotions for the other account_type, keeps 'both'."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer, Promotion
+    from db.repository import get_promotions
+
+    await init_db()
+    account_id = f"ACC-PR{uuid.uuid4().hex[:4].upper()}"
+    suffix = uuid.uuid4().hex[:6].upper()
+    residential_id = f"PROMO-RES-{suffix}"
+    business_id = f"PROMO-BIZ-{suffix}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Promo User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}",
+                             account_type="residential"))
+        session.add(Promotion(promotion_id=residential_id, title="Residential Promo",
+                              description="test", account_type="residential"))
+        session.add(Promotion(promotion_id=business_id, title="Business Promo",
+                              description="test", account_type="business"))
+        await session.commit()
+
+    result = await get_promotions(account_id)
+    ids = {p["promotion_id"] for p in result["promotions"]}
+    assert residential_id in ids
+    assert business_id not in ids
+
+
+@pytest.mark.asyncio
+async def test_get_promotions_unknown_account():
+    """get_promotions returns an error dict for an unknown account."""
+    from db.engine import init_db
+    from db.repository import get_promotions
+
+    await init_db()
+    result = await get_promotions("ACC-DOESNOTEXIST")
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# get_service_eligibility
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_service_eligibility_eligible_zip():
+    """get_service_eligibility returns the seeded plan list for a matching eligible prefix."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import ServiceArea
+    from db.repository import get_service_eligibility
+
+    await init_db()
+    prefix = str(100 + uuid.uuid4().int % 800)  # unique 3-digit numeric prefix
+
+    async with AsyncSessionLocal() as session:
+        session.add(ServiceArea(zip_prefix=prefix, eligible=1, estimated_install_days=4,
+                                available_plans='["PLAN-INT-100"]'))
+        await session.commit()
+
+    address = f"742 Evergreen Terrace, Springfield, ST {prefix}12"
+    result = await get_service_eligibility(address)
+    assert result["eligible"] is True
+    assert result["available_plans"] == ["PLAN-INT-100"]
+    assert result["estimated_install_days"] == 4
+
+
+@pytest.mark.asyncio
+async def test_get_service_eligibility_ineligible_zip():
+    """get_service_eligibility returns eligible=False with no plans for a matching ineligible prefix."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import ServiceArea
+    from db.repository import get_service_eligibility
+
+    await init_db()
+    prefix = str(100 + uuid.uuid4().int % 800)
+
+    async with AsyncSessionLocal() as session:
+        session.add(ServiceArea(zip_prefix=prefix, eligible=0, estimated_install_days=0,
+                                available_plans="[]"))
+        await session.commit()
+
+    address = f"1 Remote Road, Nowhere, ST {prefix}99"
+    result = await get_service_eligibility(address)
+    assert result["eligible"] is False
+    assert result["available_plans"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_service_eligibility_no_match_falls_back_to_eligible():
+    """get_service_eligibility defaults to eligible with standard plans when no zip is found."""
+    from db.engine import init_db
+    from db.repository import get_service_eligibility
+
+    await init_db()
+    result = await get_service_eligibility("1 Main Street, Nowhere")
+    assert result["eligible"] is True
+    assert result["available_plans"]  # non-empty default list
+
+
+# ---------------------------------------------------------------------------
+# get_appointments
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_appointments_excludes_cancelled():
+    """get_appointments excludes cancelled appointments and returns the rest ordered by date."""
+    import uuid
+    from datetime import datetime
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer, Appointment
+    from db.repository import get_appointments
+
+    await init_db()
+    account_id = f"ACC-AP{uuid.uuid4().hex[:4].upper()}"
+    suffix = uuid.uuid4().hex[:6].upper()
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Appt User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}"))
+        session.add(Appointment(appointment_id=f"APT-{suffix}A", account_id=account_id,
+                                scheduled_date=datetime(2026, 8, 1), time_window="10am-12pm",
+                                appointment_type="repair", status="scheduled"))
+        session.add(Appointment(appointment_id=f"APT-{suffix}B", account_id=account_id,
+                                scheduled_date=datetime(2026, 7, 20), time_window="2pm-4pm",
+                                appointment_type="repair", status="cancelled"))
+        await session.commit()
+
+    result = await get_appointments(account_id)
+    assert len(result["appointments"]) == 1
+    assert result["appointments"][0]["appointment_id"] == f"APT-{suffix}A"
+
+
+@pytest.mark.asyncio
+async def test_get_appointments_unknown_account():
+    """get_appointments returns an error dict for an unknown account."""
+    from db.engine import init_db
+    from db.repository import get_appointments
+
+    await init_db()
+    result = await get_appointments("ACC-DOESNOTEXIST")
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# get_account_details
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_account_details_includes_new_fields():
+    """get_account_details returns mailing_address and preferred_contact_method."""
+    import uuid
+    from db.engine import init_db, AsyncSessionLocal
+    from db.models import Customer
+    from db.repository import get_account_details
+
+    await init_db()
+    account_id = f"ACC-AD{uuid.uuid4().hex[:4].upper()}"
+
+    async with AsyncSessionLocal() as session:
+        session.add(Customer(account_id=account_id, full_name="Detail User",
+                             phone_number=f"+1555{uuid.uuid4().int % 10000000:07d}",
+                             mailing_address="1 Test Way", preferred_contact_method="email"))
+        await session.commit()
+
+    result = await get_account_details(account_id)
+    assert result["account_id"] == account_id
+    assert result["mailing_address"] == "1 Test Way"
+    assert result["preferred_contact_method"] == "email"
+
+
+@pytest.mark.asyncio
+async def test_get_account_details_unknown_account():
+    """get_account_details returns an error dict for an unknown account."""
+    from db.engine import init_db
+    from db.repository import get_account_details
+
+    await init_db()
+    result = await get_account_details("ACC-DOESNOTEXIST")
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
 # ToolExecutor phase guard
 # ---------------------------------------------------------------------------
 
