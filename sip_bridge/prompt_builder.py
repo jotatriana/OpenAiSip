@@ -744,6 +744,40 @@ def _tools_for_phase(
         },
     })
 
+    # Available only in RESOLVE and WRAP_UP — lets the model loop back to TRIAGE
+    # when the caller raises a different or unrelated issue instead of getting
+    # stuck answering it out of turn or escalating unnecessarily.
+    if phase in (ConvPhase.RESOLVE, ConvPhase.WRAP_UP):
+        base_tools.append({
+            "type": "function",
+            "name": "report_new_issue",
+            "description": (
+                "BEHAVIOR: AUTONOMOUS — call this immediately once the caller raises a "
+                "different or unrelated issue. No confirmation needed — the caller already "
+                "stated it.\n"
+                "Sends the conversation back to classification so the correct tools become "
+                "available for the new issue.\n"
+                "Use when: the caller mentions a new problem unrelated to what was just "
+                "resolved (e.g. a billing question during a technical support call, or a "
+                "second unrelated technical issue).\n"
+                "Do NOT use when: the caller is still discussing the current issue, asking a "
+                "clarifying question about it, or simply confirming/declining the current "
+                "resolution.\n"
+                "Do NOT try to answer the new issue yourself — you do not have the right "
+                "tools for it until this is called."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Brief description of the new issue the caller raised.",
+                    },
+                },
+                "required": ["summary"],
+            },
+        })
+
     return base_tools
 
 

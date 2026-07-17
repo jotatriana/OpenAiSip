@@ -170,6 +170,24 @@ async def test_backward_transition_resolve_to_diagnose():
         h.stop()
 
 
+# ── Scenario 7b: report_new_issue tool loops back to TRIAGE ───────────────────
+
+async def test_report_new_issue_loops_back_to_triage():
+    """report_new_issue from RESOLVE sends the FSM back to TRIAGE, not DIAGNOSE."""
+    h = await ScenarioHarness.create("sc-7b", account_id="ACC-7B")
+    try:
+        await h.fsm.enter(ConvPhase.RESOLVE)
+        h.assert_phase(ConvPhase.RESOLVE)
+
+        await h.call_tool("report_new_issue", {"summary": "caller mentioned a billing question"})
+
+        h.assert_phase(ConvPhase.TRIAGE)
+        assert "phase_complete" in h.tool_names_in_last_update()
+        assert "get_service_status" not in h.tool_names_in_last_update()
+    finally:
+        h.stop()
+
+
 # ── Scenario 8: Ticket creation flow ─────────────────────────────────────────
 
 async def test_ticket_creation_in_diagnose():

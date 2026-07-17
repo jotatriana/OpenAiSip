@@ -65,7 +65,7 @@ def test_resolve_phase_tools():
     assert set(names) == {
         "lookup_customer", "get_service_status", "create_ticket",
         "get_ticket", "get_account_history", "update_ticket",
-        "phase_complete", "wait_for_user", "escalate_to_agent",
+        "phase_complete", "wait_for_user", "escalate_to_agent", "report_new_issue",
     }
 
 
@@ -74,6 +74,28 @@ def test_wrap_up_phase_tools():
     assert "phase_complete" in names
     assert "escalate_to_agent" in names
     assert "lookup_customer" in names
+
+
+# ---------------------------------------------------------------------------
+# report_new_issue — RESOLVE/WRAP_UP loopback trigger
+# ---------------------------------------------------------------------------
+
+def test_report_new_issue_present_in_resolve_and_wrap_up():
+    assert "report_new_issue" in [t["name"] for t in _tools_for_phase(ConvPhase.RESOLVE)]
+    assert "report_new_issue" in [t["name"] for t in _tools_for_phase(ConvPhase.WRAP_UP)]
+
+
+def test_report_new_issue_absent_elsewhere():
+    for phase in (ConvPhase.GREETING, ConvPhase.VERIFY, ConvPhase.TRIAGE, ConvPhase.DIAGNOSE):
+        names = [t["name"] for t in _tools_for_phase(phase)]
+        assert "report_new_issue" not in names, f"report_new_issue should not appear in {phase}"
+
+
+def test_report_new_issue_is_autonomous_with_summary_param():
+    tool = next(t for t in _tools_for_phase(ConvPhase.RESOLVE) if t["name"] == "report_new_issue")
+    assert "AUTONOMOUS" in tool["description"]
+    assert "summary" in tool["parameters"]["properties"]
+    assert "summary" in tool["parameters"]["required"]
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +158,7 @@ def test_escalate_to_agent_has_use_and_avoid_rules():
 # Preamble phrases
 # ---------------------------------------------------------------------------
 
-_NO_PREAMBLE_TOOLS = {"phase_complete", "escalate_to_agent", "wait_for_user"}
+_NO_PREAMBLE_TOOLS = {"phase_complete", "escalate_to_agent", "wait_for_user", "report_new_issue"}
 
 
 def test_db_backed_tools_have_preamble_phrases():

@@ -157,6 +157,43 @@ async def handle(
             log.debug("wait_for_user processed", extra={"call_id": call_id})
             return
 
+    # report_new_issue: the caller raised a different issue during RESOLVE/WRAP_UP.
+    # Loop back to TRIAGE (not DIAGNOSE) so the caller's new issue gets classified
+    # into the correct service_category — it may not match the current one.
+    if tool_name == "report_new_issue":
+        async with session_manager.tool_lock:
+            await session_manager.wait_for_response_done(timeout=15.0)
+
+            if fsm:
+                from core.models import ConvPhase
+                await fsm.transition(ConvPhase.TRIAGE, reason=tool_args.get("summary", ""))
+
+            await session_manager.send_event({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": item_id,
+                    "output": "Returning to classification for the new issue.",
+                },
+            })
+
+            # Same TRIAGE-entry override as the phase_complete branch above — force
+            # immediate silent classification, no conversational audio.
+            await session_manager.send_event({
+                "type": "response.create",
+                "response": {
+                    "instructions": (
+                        "Call the phase_complete function now. "
+                        "Set service_category to the one that matches what the caller described. "
+                        "Do not speak. Do not generate audio. Only call phase_complete. "
+                        "service_category must be one of: technical_support, billing, sales, "
+                        "move_transfer, appointment, account."
+                    ),
+                },
+            })
+            log.debug("report_new_issue processed", extra={"call_id": call_id})
+            return
+
     # Acquire the per-session tool lock before touching the response-ready event.
     # When the model batches multiple function calls in one response they all fire
     # concurrently as asyncio tasks; without this lock they race on _response_ready
@@ -455,6 +492,7 @@ _DIAGNOSE_ALLOWED = {
     "get_account_details",
 }
 _RESOLVE_ALLOWED = _DIAGNOSE_ALLOWED | {
+    "report_new_issue",
     # technical_support
     "update_ticket",
     # sales

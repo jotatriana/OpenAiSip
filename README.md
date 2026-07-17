@@ -201,6 +201,22 @@ WRAP_UP    →  Ask if anything else; handle further issues with full tool set; 
 
 Each phase sends a `session.update` to the OpenAI Realtime API with phase-specific instructions and a scoped set of tools. The model calls `phase_complete` to advance; if it stalls, the FSM auto-advances after the phase turn limit (TRIAGE: 2, DIAGNOSE: 4, all others: 8).
 
+### Phase details
+
+**GREETING** — Always the entry phase. Tools: `phase_complete`, `wait_for_user`, `escalate_to_agent` only — no `lookup_customer`, no service/ticket tools. Known callers (matched by SIP caller ID) are greeted by first name with their account suffix and service names; unknown callers get a generic greeting. Explicitly forbidden from stating anything about incidents, outages, or tickets here, even if asked — it says "let me check on that" and advances. Capped at ~2 exchanges by prompt instruction. `phase_complete` → VERIFY, but `advance()` skips VERIFY entirely when `account_id` is already known, jumping straight to TRIAGE.
+
+**VERIFY** — Confirms identity. Known callers get a light confirmation only ("am I speaking with the account holder?"), no tool call. Unknown callers: if a verified SIP caller-ID number exists, `lookup_customer(identifier_type="phone")` is called with that number (never a number the caller speaks aloud); otherwise the model asks for email or account ID and reads it back character-by-character before submitting. Tools: `lookup_customer`, `phase_complete`, `wait_for_user`, `escalate_to_agent`. → TRIAGE. Entirely skipped for known callers.
+
+**TRIAGE** — Classifies the issue into exactly one of the 6 `service_category` values, nothing else. Tools: only `phase_complete` (+ `wait_for_user`) — no `lookup_customer`, no service tools, no `escalate_to_agent`. `tool_choice` is forced to `"required"` at the session level so the model cannot generate speech-only turns, and the phase is hard-capped at 2 turns in code (`conversation_fsm.py`'s `_TRIAGE_MAX_TURNS`). `phase_complete` requires `service_category`, validated against `SERVICE_CATEGORIES`, written to `Call.service_category`, and that value determines which tools appear in DIAGNOSE/RESOLVE/WRAP_UP. Always → DIAGNOSE.
+
+**DIAGNOSE** — Calls the matched category's primary read tool and reports findings. Hard-capped at 4 turns. Instructed to call the primary tool immediately, no clarifying questions first (except move_transfer, which needs the new address). After reporting, says a brief bridge phrase, then calls `phase_complete` — never asks "anything else?" here (that's WRAP_UP's job). `tool_choice: "required"` is forced on entry via a post-`phase_complete` override to guarantee the tool actually fires. Reasoning effort: `medium` — the one phase with genuine multi-step reasoning. → RESOLVE.
+
+**RESOLVE** — Takes action on what DIAGNOSE found; explicitly told not to repeat it. `technical_support` uses `create_ticket` (confirm once, read back `ticket_id`) or `update_ticket`; other categories' write/action tools are still `feature_pending` stubs, so the model tells the caller and calls `escalate_to_agent`. `tool_choice` is *not* forced here, so the model can ask a confirmation question and wait for the answer before calling a write tool. Reasoning effort: `low`. → WRAP_UP.
+
+**WRAP_UP** — Confirms nothing else is needed, closes cleanly. Warns the model not to claim the issue is "fixed" if a service incident might still be active. The full category tool set stays available for follow-ups (e.g. "what tickets do I have" → `get_service_status`), then it re-asks "anything else?" before calling `phase_complete`. Reasoning effort: `minimal`. `phase_complete` from WRAP_UP doesn't move to another phase — it's the one case that ends the call (`_end_session()`).
+
+**Backward loopback (RESOLVE/WRAP_UP → TRIAGE)** — the `report_new_issue` tool lets the model send the call back to TRIAGE when the caller raises a different or unrelated issue (e.g. a billing question during a technical support call). `ToolExecutor` calls `fsm.transition(ConvPhase.TRIAGE, reason=summary)` instead of the normal forward `advance()`; the underlying `ConversationFSM.transition(target, reason)` method supports jumping to any phase and is also exercised directly by `tests/test_conversation_fsm.py::test_backward_transition`. The loopback always lands on TRIAGE rather than jumping straight back to DIAGNOSE — the new issue might belong to a different `service_category` entirely, so it's cheaper and more reliable to let TRIAGE's already-tested 2-turn classification pick the right category than to have the model guess whether it's "the same" issue.
+
 > **Realtime session-config schema:** `prompt_builder.build()` produces `{"type": "realtime", "model", "instructions", "tools", "tool_choice", "reasoning": {"effort": ...}, "audio": {"input": {...}, "output": {...}}}`. Audio format fields are objects, not strings — `{"type": "audio/pcm", "rate": 24000}`, not `"pcm16"`. This same dict is sent as-is both as the REST body to `POST /v1/realtime/calls/{call_id}/accept` and nested under `{"type": "session.update", "session": ...}` for every WS phase transition. Requests to both the REST accept endpoint and the WebSocket use only `Authorization: Bearer <key>` — do **not** add an `OpenAI-Beta: realtime=v1` header; it routes the request to a stale API path whose call registry the WebSocket layer can't see, producing a `call_id_not_found` 404 on connect even though `/accept` returns 200.
 >
 > **`conversation.item.create` content type:** assistant-authored `message` items (e.g. the pre-transfer escalation announcement in `conversation_fsm.py`) must use `content: [{"type": "output_text", "text": ...}]`. The old `"type": "text"` is rejected with `invalid_value` once the item is actually processed — the surrounding `conversation.item.create`/`response.create` calls still return success, so the failure only shows up as an `error` event a beat later in the WS event stream.
@@ -214,6 +230,7 @@ Tools available in DIAGNOSE/RESOLVE depend on the `service_category` set during 
 | `phase_complete` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `wait_for_user` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `escalate_to_agent` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `report_new_issue` | — | — | — | — | — | ✓ | ✓ |
 | `lookup_customer` | — | — | ✓ | — | ✓ | ✓ | ✓ |
 | `get_service_status` | technical_support | — | — | — | ✓ | ✓ | ✓ |
 | `get_ticket` | technical_support | — | — | — | ✓ | ✓ | ✓ |
@@ -237,7 +254,7 @@ Tools available in DIAGNOSE/RESOLVE depend on the `service_category` set during 
 | `get_account_details` | account | — | — | — | ✓ | — | — |
 | `update_contact_info` | account | — | — | — | — | ✓ | — |
 
-> Note: `lookup_customer` is not listed in TRIAGE above because it is removed from TRIAGE's tool set in the current implementation (account should already be confirmed before TRIAGE, or VERIFY handles it). All non-technical-support tools are v1 stubs that return `feature_pending` and auto-escalate.
+> Note: `lookup_customer` is not listed in TRIAGE above because it is removed from TRIAGE's tool set in the current implementation (account should already be confirmed before TRIAGE, or VERIFY handles it). The 7 read tools for the non-technical-support categories (`get_account_balance`, `get_payment_history`, `get_product_catalog`, `get_promotions`, `get_service_eligibility`, `get_appointments`, `get_account_details`) are mock-data-backed and return real data. The 9 write/action tools (`make_payment`, `setup_autopay`, `initiate_upgrade`, `initiate_service_move`, `cancel_service`, `confirm_appointment`, `cancel_appointment`, `reschedule_appointment`, `update_contact_info`) are still v1 stubs that return `feature_pending` and auto-escalate.
 
 ### Escalation
 

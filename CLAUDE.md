@@ -85,6 +85,7 @@ The category is validated against `SERVICE_CATEGORIES` in `core/models.py` and w
 |---|---|---|---|
 | `phase_complete` | All phases | — | Advance to the next phase (or end session from WRAP_UP); accepts optional `service_category` in TRIAGE |
 | `escalate_to_agent` | All phases | — | Trigger SIP REFER to human agent |
+| `report_new_issue` | RESOLVE, WRAP_UP | — | Loop back to TRIAGE when the caller raises a different/unrelated issue; `ToolExecutor` calls `fsm.transition(ConvPhase.TRIAGE, ...)` instead of the normal forward `advance()` |
 | `lookup_customer` | VERIFY onward | — | Look up account by verified phone, email, or account ID |
 | `get_service_status` | DIAGNOSE onward | technical_support | Fetch services, open incidents, and open support tickets |
 | `get_ticket` | DIAGNOSE onward | technical_support | Look up any ticket by ID (including resolved/closed) |
