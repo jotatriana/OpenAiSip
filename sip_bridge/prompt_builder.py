@@ -43,7 +43,8 @@ NEVER state, estimate, or fabricate any billing figure not returned by a tool.""
         billing_section = """## CRITICAL — No Billing Access
 You do NOT have access to billing data, invoices, charges, payment history, or account balances.
 This system has NO billing tools.
-If a caller asks ANYTHING about their bill, a charge, a payment, or their balance, respond with EXACTLY:
+If `report_new_issue` is in your current tool list and a caller asks about billing, call it immediately — do NOT use the scripted line below. report_new_issue reclassifies the call so a billing specialist path (with real billing tools) can take over.
+Otherwise, if a caller asks ANYTHING about their bill, a charge, a payment, or their balance, respond with EXACTLY:
 "I don't have access to billing details, but I can connect you with an agent who can help with that — would you like me to transfer you?"
 Do NOT state, estimate, or describe any billing figure under any circumstance."""
 
@@ -60,7 +61,7 @@ If a caller asks about anything outside these topics, say exactly:
 Do not attempt to answer, speculate, or redirect outside this scope.
 
 ## Priority
-If two rules ever conflict, resolve in this order: (1) never fabricate or state a figure no tool returned, (2) the billing/scope redirect phrases, (3) the current phase's stated objective.
+If two rules ever conflict, resolve in this order: (1) never fabricate or state a figure no tool returned, (2) call `report_new_issue` if it is in your current tool list and the caller raised a different topic, (3) the billing/scope redirect phrases, (4) the current phase's stated objective.
 
 {billing_section}
 
@@ -1067,7 +1068,11 @@ def build(
             )
         ),
         ConvPhase.DIAGNOSE: _diagnose_instructions(service_category, _account_context),
-        ConvPhase.RESOLVE: _resolve_instructions(service_category, _account_context),
+        ConvPhase.RESOLVE: _resolve_instructions(service_category, _account_context) + (
+            "\n- If the caller raises a DIFFERENT or unrelated issue, call report_new_issue "
+            "immediately instead of answering it yourself or using a scripted redirect — it "
+            "takes priority over other redirect instructions whenever it is in your tool list."
+        ),
         ConvPhase.WRAP_UP: (
             "## Wrap-Up Phase\n"
             + _account_context
@@ -1084,6 +1089,11 @@ def build(
             "  * Caller quotes a specific ticket number → call get_ticket with that ticket_id.\n"
             "  * Caller asks about past issues → call get_account_history.\n"
             "  * Caller wants to create a ticket → call create_ticket (confirm summary first).\n"
+            "  * Caller raises a DIFFERENT or unrelated issue (e.g. a billing question during a "
+            "technical support call) → call report_new_issue IMMEDIATELY instead of answering it "
+            "yourself or using a scripted redirect. Do this even if the caller's new topic matches "
+            "a scripted deflection phrase elsewhere in your instructions — report_new_issue takes "
+            "priority whenever it is in your tool list.\n"
             "- Keep this phase brief — 2–3 exchanges maximum before calling phase_complete.\n"
             "- Do NOT call phase_complete before confirming the caller has no further questions."
         ),
