@@ -240,7 +240,7 @@ class SessionManager:
                 })
                 log.debug("Token usage recorded: %d total", usage.total_tokens, extra={"call_id": call_id})
 
-        elif t == "response.audio_transcript.done":
+        elif t == "response.output_audio_transcript.done":
             text = event.get("transcript", "")
             if text:
                 asyncio.create_task(self._save_transcript_turn("assistant", text))

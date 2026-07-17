@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # OpenAI / SIP Bridge
     openai_api_key: str
     openai_project_id: str
-    openai_model: str = "gpt-realtime-mini"
+    openai_model: str = "gpt-realtime-2.1"
     openai_voice: str = "alloy"
     webhook_secret: str
     webhook_listen_host: str = "0.0.0.0"
@@ -57,13 +57,13 @@ class Settings(BaseSettings):
     # before the original call leg is torn down.
     transfer_hangup_delay_seconds: int = 10
 
-    # Cost tracking — gpt-realtime-mini pricing (USD per 1 000 tokens)
+    # Cost tracking — gpt-realtime-2.1 pricing (USD per 1 000 tokens)
     # Update these when OpenAI revises pricing.
-    cost_input_audio_per_1k: float = 0.10
-    cost_output_audio_per_1k: float = 0.20
-    cost_input_text_per_1k: float = 0.005
-    cost_output_text_per_1k: float = 0.02
-    cost_input_cached_per_1k: float = 0.0025
+    cost_input_audio_per_1k: float = 0.032
+    cost_output_audio_per_1k: float = 0.064
+    cost_input_text_per_1k: float = 0.004
+    cost_output_text_per_1k: float = 0.024
+    cost_input_cached_per_1k: float = 0.0004
 
     # Daily spend budget in USD; 0.0 means no limit
     daily_budget_usd: float = 0.0

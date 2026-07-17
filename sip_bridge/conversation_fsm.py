@@ -184,7 +184,7 @@ class ConversationFSM:
                         "type": "message",
                         "role": "assistant",
                         "content": [{
-                            "type": "text",
+                            "type": "output_text",
                             "text": "Let me connect you with one of our agents who can better assist you — please hold.",
                         }],
                     },
