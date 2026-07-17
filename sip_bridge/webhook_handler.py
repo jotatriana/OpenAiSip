@@ -14,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import time
@@ -42,6 +43,10 @@ async def handle_incoming(request: Request) -> dict:
 
     event_type = payload.get("type")
     log.info("Webhook event: %s", event_type)
+    log.debug(
+        "RAW webhook — headers: %s\nRAW webhook — body: %s",
+        dict(request.headers), json.dumps(payload, indent=2),
+    )
 
     try:
         if event_type == "realtime.call.incoming":

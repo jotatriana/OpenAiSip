@@ -57,7 +57,7 @@ Both servers run in the **same process** so they share a single in-memory `Event
 - **Maintenance mode** — operator toggle to pause new calls (REST API)
 - **Token usage tracking** per call and globally with per-type breakdown (text, audio, cached)
 - **Cost tracking** — configurable per-token pricing; daily spend accumulator with budget alert and hard stop
-- **Caller audio transcription** — `input_audio_transcription: {model: "whisper-1"}` enabled in every `session.update`; caller turns appear in the live transcript panel alongside agent turns
+- **Caller audio transcription** — `audio.input.transcription: {model: "whisper-1"}` enabled in every `session.update`; caller turns appear in the live transcript panel alongside agent turns
 - **Transcript persistence** — every spoken turn saved to DB with PCI scrubbing (regex card-number redaction); scrubbed text published to dashboard WebSocket; configurable retention
 - **CDR persistence** — call detail record written at call end with billing fields, token counts, and cost
 - **Per-call event timeline** — append-only log of phase transitions, tool calls, WS reconnects, and escalations; published to dashboard in real time via `CALL_EVENT` WebSocket messages
@@ -198,6 +198,8 @@ WRAP_UP    →  Ask if anything else; handle further issues with full tool set; 
 ```
 
 Each phase sends a `session.update` to the OpenAI Realtime API with phase-specific instructions and a scoped set of tools. The model calls `phase_complete` to advance; if it stalls, the FSM auto-advances after the phase turn limit (TRIAGE: 2, DIAGNOSE: 4, all others: 8).
+
+> **Realtime session-config schema:** `prompt_builder.build()` produces `{"type": "realtime", "model", "instructions", "tools", "tool_choice", "audio": {"input": {...}, "output": {...}}}`. Audio format fields are objects, not strings — `{"type": "audio/pcm", "rate": 24000}`, not `"pcm16"`. This same dict is sent as-is both as the REST body to `POST /v1/realtime/calls/{call_id}/accept` and nested under `{"type": "session.update", "session": ...}` for every WS phase transition. Requests to both the REST accept endpoint and the WebSocket use only `Authorization: Bearer <key>` — do **not** add an `OpenAI-Beta: realtime=v1` header; it routes the request to a stale API path whose call registry the WebSocket layer can't see, producing a `call_id_not_found` 404 on connect even though `/accept` returns 200.
 
 ### Tool availability by phase
 

@@ -186,9 +186,14 @@ def test_resolve_instructions_include_failure_handling():
 
 def test_build_returns_required_keys():
     config = build(ConvPhase.GREETING)
-    for key in ("model", "voice", "instructions", "tools", "tool_choice",
-                "input_audio_format", "output_audio_format", "turn_detection"):
+    assert config["type"] == "realtime"
+    for key in ("model", "instructions", "tools", "tool_choice", "audio"):
         assert key in config
+    assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
+    assert config["audio"]["input"]["transcription"] == {"model": "whisper-1"}
+    assert config["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+    assert config["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
+    assert "voice" in config["audio"]["output"]
 
 
 def test_build_greeting_with_caller_name():

@@ -20,7 +20,6 @@ def _headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {s.openai_api_key}",
         "Content-Type": "application/json",
-        "OpenAI-Beta": "realtime=v1",
     }
 
 
@@ -34,6 +33,11 @@ async def accept(call_id: str, session_config: dict) -> dict:
         )
         resp.raise_for_status()
         data = resp.json() if resp.content else {}
+        log.debug(
+            "Accept response body: %r (content-length=%s)",
+            data, resp.headers.get("content-length"),
+            extra={"call_id": call_id},
+        )
 
     call = await store.get_call(call_id)
     if call:

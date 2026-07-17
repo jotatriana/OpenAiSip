@@ -1008,20 +1008,27 @@ def build(
     }[phase]
 
     return {
+        "type": "realtime",
         "model": s.openai_model,
-        "voice": s.openai_voice,
         "instructions": _base_instructions(phase_instructions, service_category=service_category),
         "tools": _tools_for_phase(phase, known_caller=known_caller, service_category=service_category),
         # TRIAGE: force a function call in every response. The only available tool is
         # phase_complete, so the model MUST call it and cannot generate speech-only turns.
         "tool_choice": "required" if phase == ConvPhase.TRIAGE else "auto",
-        "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
-        "input_audio_transcription": {"model": "whisper-1"},
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": 0.5,
-            "prefix_padding_ms": 300,
-            "silence_duration_ms": 500,
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {"model": "whisper-1"},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
+            },
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "voice": s.openai_voice,
+            },
         },
     }

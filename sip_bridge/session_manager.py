@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import websockets
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from config.settings import get_settings
 from core.event_bus import bus
@@ -71,8 +71,8 @@ class SessionManager:
         url = f"wss://api.openai.com/v1/realtime?call_id={call_id}"
         headers = {
             "Authorization": f"Bearer {s.openai_api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
+        log.debug("Attempting WS connect: url=%s", url, extra={"call_id": call_id})
 
         _sessions[call_id] = self
 
@@ -135,6 +135,17 @@ class SessionManager:
                     from db.repository import emit_call_event, EVENT_WS_FAILED
                     emit_call_event(call_id, EVENT_WS_FAILED, {"attempts": len(_RECONNECT_BACKOFFS) + 1})
                     await self._handle_ws_failure()
+
+            except InvalidStatus as exc:
+                body = exc.response.body.decode(errors="replace") if exc.response.body else "<empty>"
+                log.error(
+                    "WebSocket handshake rejected: HTTP %d — %s",
+                    exc.response.status_code, body,
+                    extra={"call_id": call_id},
+                )
+                await store.record_ws_error()
+                await self._handle_ws_failure()
+                break
 
             except Exception as exc:
                 log.error("WebSocket error: %s", exc, extra={"call_id": call_id})
