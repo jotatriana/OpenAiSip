@@ -56,7 +56,7 @@ def test_diagnose_phase_tools():
     assert set(names) == {
         "lookup_customer", "get_service_status", "create_ticket",
         "get_ticket", "get_account_history",
-        "phase_complete", "escalate_to_agent",
+        "phase_complete", "wait_for_user", "escalate_to_agent",
     }
 
 
@@ -65,7 +65,7 @@ def test_resolve_phase_tools():
     assert set(names) == {
         "lookup_customer", "get_service_status", "create_ticket",
         "get_ticket", "get_account_history", "update_ticket",
-        "phase_complete", "escalate_to_agent",
+        "phase_complete", "wait_for_user", "escalate_to_agent",
     }
 
 
@@ -136,7 +136,7 @@ def test_escalate_to_agent_has_use_and_avoid_rules():
 # Preamble phrases
 # ---------------------------------------------------------------------------
 
-_NO_PREAMBLE_TOOLS = {"phase_complete", "escalate_to_agent"}
+_NO_PREAMBLE_TOOLS = {"phase_complete", "escalate_to_agent", "wait_for_user"}
 
 
 def test_db_backed_tools_have_preamble_phrases():

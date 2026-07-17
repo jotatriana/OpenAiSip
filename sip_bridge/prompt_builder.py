@@ -12,6 +12,20 @@ from __future__ import annotations
 from config.settings import get_settings
 from core.models import ConvPhase
 
+# gpt-realtime-2.x reasoning effort per phase — lowest effort that still gives
+# the model enough intelligence for the task (see Realtime 2.0 prompting guide).
+# GREETING/TRIAGE/WRAP_UP are single scripted/classification turns; VERIFY and
+# RESOLVE are simple lookup-or-confirm-then-act; DIAGNOSE is the only phase with
+# genuine multi-step, category-specific reasoning.
+_REASONING_EFFORT: dict[ConvPhase, str] = {
+    ConvPhase.GREETING: "minimal",
+    ConvPhase.TRIAGE: "minimal",
+    ConvPhase.VERIFY: "low",
+    ConvPhase.DIAGNOSE: "medium",
+    ConvPhase.RESOLVE: "low",
+    ConvPhase.WRAP_UP: "minimal",
+}
+
 
 def _base_instructions(phase_instructions: str, service_category: str | None = None) -> str:
     s = get_settings()
@@ -45,6 +59,9 @@ If a caller asks about anything outside these topics, say exactly:
 "I'm sorry, I can only assist with account information, service status, support tickets, or connecting you with an agent."
 Do not attempt to answer, speculate, or redirect outside this scope.
 
+## Priority
+If two rules ever conflict, resolve in this order: (1) never fabricate or state a figure no tool returned, (2) the billing/scope redirect phrases, (3) the current phase's stated objective.
+
 {billing_section}
 
 ## Incidents vs Support Tickets — CRITICAL DISTINCTION
@@ -53,7 +70,6 @@ Do not attempt to answer, speculate, or redirect outside this scope.
 - A SERVICE INCIDENT is a network or area-wide outage that our engineering team is already working on.
 - It is NOT a customer ticket. The customer did NOT open it. Our team opened it.
 - When an incident is present, say: "I can see there is a known service incident in your area — [title]. Our team is actively working on it."
-- Do NOT say "you have an open ticket" or "a ticket was opened" when referring to an incident.
 - Tell the customer the incident status and estimated resolution if available.
 - You cannot resolve an incident — direct the customer to wait for the engineering team.
 
@@ -61,7 +77,6 @@ Do not attempt to answer, speculate, or redirect outside this scope.
 - A SUPPORT TICKET is a specific request logged on behalf of the customer, created by calling create_ticket.
 - When a support ticket is present, say: "I can see you have an open support ticket — [summary]."
 - When no support ticket exists, say: "You don't have any open support tickets."
-- Do NOT call a support ticket an "incident" or an "outage".
 
 ### When both exist
 - Report them separately. First mention the incident, then the support ticket, as distinct items.
@@ -88,10 +103,22 @@ Do not attempt to answer, speculate, or redirect outside this scope.
 - Speak at a moderate, natural pace. Use variety in phrasing — never repeat the same sentence twice.
 - Be warm, direct, and professional.
 
+## Reasoning
+- For direct answers, simple confirmations, and short lookups, respond right away — do not reason at length first.
+- For multi-step diagnostics, tool selection among several options, or escalation decisions, reason through the steps before acting.
+- Skip reasoning entirely when the caller's audio is unclear — ask for clarification instead of trying to guess.
+
+## Verbosity
+- Direct answers: 1-2 short sentences.
+- Clarifying questions: ask one question at a time.
+- Tool results: summarize the result first, then state only the next useful action.
+- Escalations: briefly explain why escalation is needed and what happens next.
+
 ## Audio Handling
-- If you hear background noise or unclear speech: "I'm sorry, could you repeat that?"
+- If the caller's speech is addressed to you but unclear or hard to understand: "I'm sorry, could you repeat that?"
+- If audio cuts out mid-sentence while the caller is speaking to you, wait 1 second then prompt: "I didn't catch the end of that."
 - For alphanumeric strings read back CHARACTER BY CHARACTER: account "A1B2" → "That's A, 1, B, 2."
-- If audio cuts out mid-sentence, wait 1 second then prompt: "I didn't catch the end of that."
+- If the latest audio is NOT addressed to you — silence, background noise, hold music, TV audio, or a side conversation — call wait_for_user and do NOT speak. Do NOT say "could you repeat that?" or "I didn't catch that" in this case; those replies are only for unclear speech that IS addressed to you.
 
 ## Phase-Specific Instructions
 {phase_instructions}
@@ -663,6 +690,27 @@ def _tools_for_phase(
             },
         })
 
+    # wait_for_user: no-op tool for audio that is NOT addressed to you — silence,
+    # background noise, hold music, TV audio, side conversation. Ends the turn
+    # without a spoken reply, instead of guessing or saying "I didn't catch that."
+    # Available in every phase, including TRIAGE.
+    base_tools.append({
+        "type": "function",
+        "name": "wait_for_user",
+        "description": (
+            "BEHAVIOR: SILENT — call this when the latest audio does not need a spoken "
+            "response: silence, background noise, hold music, TV audio, side conversation, "
+            "or speech not addressed to you. This ends the turn without speaking.\n"
+            "Do NOT use this for audio that IS addressed to you but hard to understand — "
+            "ask for clarification instead in that case."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    })
+
     # Available in all phases EXCEPT TRIAGE — TRIAGE must route via phase_complete only.
     # If a caller demands a human in TRIAGE, the model routes to a category and DIAGNOSE escalates.
     if phase == ConvPhase.TRIAGE:
@@ -1015,6 +1063,7 @@ def build(
         # TRIAGE: force a function call in every response. The only available tool is
         # phase_complete, so the model MUST call it and cannot generate speech-only turns.
         "tool_choice": "required" if phase == ConvPhase.TRIAGE else "auto",
+        "reasoning": {"effort": _REASONING_EFFORT[phase]},
         "audio": {
             "input": {
                 "format": {"type": "audio/pcm", "rate": 24000},

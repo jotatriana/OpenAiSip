@@ -1,6 +1,10 @@
 """Handles tool/function calls from the OpenAI Realtime API.
 
-Injects an audio preamble before executing each tool to mask latency.
+gpt-realtime-2 generates its own spoken preamble (steered by the
+"Preamble sample phrases" in each tool's description) in the same turn it
+calls a tool, so this module dispatches the tool immediately after the
+triggering response finishes rather than forcing a separate scripted
+preamble turn.
 """
 from __future__ import annotations
 
@@ -9,36 +13,6 @@ import logging
 from typing import Any
 
 log = logging.getLogger(__name__)
-
-# Map tool names to a natural spoken preamble
-_PREAMBLES: dict[str, str] = {
-    "lookup_customer": "I'm looking up your account now.",
-    "get_service_status": "I'm checking your service status.",
-    "create_ticket": "I'm creating a support ticket for you now.",
-    "get_ticket": "I'm pulling up that ticket now.",
-    "update_ticket": "I'm updating that ticket for you now.",
-    "get_account_history": "I'm pulling up your account history.",
-    "escalate_to_agent": "I'm transferring you to a live agent now. Please hold.",
-    # New service category tools
-    "get_product_catalog": "I'm looking up our available plans and products.",
-    "get_promotions": "I'm checking for promotions on your account.",
-    "initiate_upgrade": "I'm processing that request for you now.",
-    "get_account_balance": "I'm pulling up your account balance.",
-    "get_payment_history": "I'm looking up your payment history.",
-    "make_payment": "I'm processing that payment now.",
-    "setup_autopay": "I'm setting up automatic payments for you.",
-    "get_service_eligibility": "I'm checking service availability for that address.",
-    "initiate_service_move": "I'm submitting that service move request.",
-    "cancel_service": "I'm processing that cancellation request.",
-    "get_appointments": "I'm pulling up your appointment details.",
-    "confirm_appointment": "I'm confirming that appointment for you now.",
-    "cancel_appointment": "I'm cancelling that appointment now.",
-    "reschedule_appointment": "I'm submitting that reschedule request.",
-    "get_account_details": "I'm pulling up your account details.",
-    "update_contact_info": "I'm updating your account information now.",
-}
-
-_DEFAULT_PREAMBLE = "I'm checking that now."
 
 
 async def handle(
@@ -165,6 +139,24 @@ async def handle(
             log.debug("phase_complete processed", extra={"call_id": call_id})
             return
 
+    # wait_for_user is a no-op: the caller's audio wasn't addressed to the
+    # assistant (silence, background noise, hold music, side conversation).
+    # Return the function result and end the turn WITHOUT calling response.create
+    # — no FSM advance, no preamble, no spoken reply.
+    if tool_name == "wait_for_user":
+        async with session_manager.tool_lock:
+            await session_manager.wait_for_response_done(timeout=10.0)
+            await session_manager.send_event({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": item_id,
+                    "output": "Waiting for the caller.",
+                },
+            })
+            log.debug("wait_for_user processed", extra={"call_id": call_id})
+            return
+
     # Acquire the per-session tool lock before touching the response-ready event.
     # When the model batches multiple function calls in one response they all fire
     # concurrently as asyncio tasks; without this lock they race on _response_ready
@@ -230,24 +222,13 @@ async def _handle_with_lock(
         })
         return
 
-    preamble = _PREAMBLES.get(tool_name, _DEFAULT_PREAMBLE)
-
     # The tool was triggered by response.function_call_arguments.done, which fires
-    # BEFORE the triggering response sends response.done. Wait for that response to
-    # finish before injecting the preamble, otherwise OpenAI rejects the preamble
-    # response.create with "conversation_already_has_active_response".
+    # BEFORE the triggering response sends response.done. That triggering response
+    # may already include the model's own spoken preamble (gpt-realtime-2 generates
+    # these natively in the same turn it decides to call a tool, steered by the
+    # "Preamble sample phrases" in each tool's description). Wait for it to finish,
+    # then dispatch the tool immediately — no separate scripted preamble turn.
     await session_manager.wait_for_response_done(timeout=10.0)
-
-    # Inject audio preamble to mask latency
-    await session_manager.send_event({
-        "type": "conversation.item.create",
-        "item": {
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": preamble}],
-        },
-    })
-    await session_manager.send_event({"type": "response.create"})
 
     # Execute the actual tool with timeout and transient-error retry
     log.info("Tool call: %s args=%s", tool_name, tool_args, extra={"call_id": call_id})
@@ -294,11 +275,6 @@ async def _handle_with_lock(
         log.debug("Tool %s completed, closing session", tool_name, extra={"call_id": call_id})
         await session_manager.close()
         return
-
-    # Wait for the preamble response to finish before sending the tool result.
-    # Without this, OpenAI rejects the response.create with
-    # "conversation_already_has_active_response".
-    await session_manager.wait_for_response_done(timeout=15.0)
 
     # Return tool result to the model
     await session_manager.send_event({

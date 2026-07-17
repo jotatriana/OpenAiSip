@@ -38,6 +38,7 @@ Both servers run in the **same process** so they share a single in-memory `Event
 - **6-phase conversation FSM**: Greeting → Verify → Triage → Diagnose → Resolve → Wrap-Up
   - VERIFY is skipped automatically when the caller is identified by caller ID
   - Model-driven phase transitions via `phase_complete` tool; 8-turn auto-advance safety net (TRIAGE capped at 2 turns, DIAGNOSE at 4 turns)
+- **Realtime 2.0 prompting alignment** (`gpt-realtime-2.1`) — `session.update` sets `reasoning.effort` per phase (`minimal` for GREETING/TRIAGE/WRAP_UP, `low` for VERIFY/RESOLVE, `medium` for DIAGNOSE) so the model reasons only as deeply as each phase actually needs; base instructions include `## Reasoning` and `## Verbosity` sections per the model's prompting guide
 - **Service category classification** — TRIAGE requires the model to classify every caller into one of 6 categories via `phase_complete(service_category=...)`: `technical_support`, `billing`, `sales`, `move_transfer`, `appointment`, `account`; category is validated, written to `Call.service_category`, persisted to the CDR, and used to select the correct tool set for DIAGNOSE and RESOLVE
 - **Category-specific tool routing** — DIAGNOSE and RESOLVE expose only the tools for the matched category; unrelated tools are withheld entirely; `_PHASE_TOOL_ALLOWLIST` is the security backstop preventing cross-category tool calls
 - **Live database tool calls** — `lookup_customer` (by verified phone, email, or account ID), `get_service_status` (returns services, open incidents, and open support tickets), `create_ticket`, `get_ticket` (look up any ticket by ID including resolved), `update_ticket` (change status/priority with caller confirmation), `get_account_history` (resolved tickets + incidents for repeat-caller context) — all backed by SQLAlchemy async ORM (SQLite / PostgreSQL); ticket creation requires ONE-round issue summary confirmation and reads back the `ticket_id` immediately after
@@ -49,14 +50,15 @@ Both servers run in the **same process** so they share a single in-memory `Event
 - **Phone lookup hard enforcement** — `ToolExecutor` validates every `lookup_customer` phone call against the session's verified caller ID before touching the DB; fabricated numbers are rejected with a log warning and the model is told to ask for email or account ID instead
 - **`lookup_customer` PROACTIVE suppressed when account known** — `_tools_for_phase()` switches the tool's behaviour tag from `PROACTIVE` to `ON DEMAND ONLY` once the account is confirmed, preventing the model from auto-calling it with invented identifiers
 - **Concurrent tool call serialisation** — per-session `asyncio.Lock` ensures that when the model batches multiple function calls in one response, they execute one at a time and never race on the shared `_response_ready` event
-- **Audio preambles** injected before each tool call to mask DB latency; two `wait_for_response_done()` barriers ensure the triggering response and preamble both finish before the next `response.create` is sent, preventing OpenAI protocol errors
+- **Native tool-call preambles** — `gpt-realtime-2` speaks its own preamble (steered by "Preamble sample phrases" in each tool description) in the same turn it calls a tool; `ToolExecutor` waits for that triggering response to finish, then dispatches the tool immediately — no separate scripted preamble turn, no double-speaking
+- **`wait_for_user` no-op tool** — available in every phase (including TRIAGE); the model calls it for audio not addressed to it (silence, background noise, hold music, side conversation) and the turn ends without a spoken reply, instead of guessing or saying "I didn't catch that"
 - **Automatic escalation** via SIP REFER when frustration or tool-failure thresholds are exceeded
 - **Warm handoff context** — structured briefing packet written to DB (and optionally POSTed to agent desktop webhook) when a call escalates
 - **WebSocket resilience** — 3-attempt reconnection with exponential backoff; configurable ping/pong heartbeat
 - **Circuit breaker** — automatically rejects new calls when repeated WS failures indicate a degraded upstream
 - **Maintenance mode** — operator toggle to pause new calls (REST API)
 - **Token usage tracking** per call and globally with per-type breakdown (text, audio, cached)
-- **Cost tracking** — configurable per-token pricing; daily spend accumulator with budget alert and hard stop
+- **Cost tracking** — configurable per-token pricing (defaults in `config/settings.py` match `gpt-realtime-2.1` — update `COST_*_PER_1K` in `.env` if you switch models); daily spend accumulator with budget alert and hard stop
 - **Caller audio transcription** — `audio.input.transcription: {model: "whisper-1"}` enabled in every `session.update`; caller turns appear in the live transcript panel alongside agent turns
 - **Transcript persistence** — every spoken turn saved to DB with PCI scrubbing (regex card-number redaction); scrubbed text published to dashboard WebSocket; configurable retention
 - **CDR persistence** — call detail record written at call end with billing fields, token counts, and cost
@@ -93,7 +95,7 @@ OpenAiSip/
 │   ├── session_manager.py         # Per-call WS event loop, reconnection, transcript capture
 │   ├── conversation_fsm.py        # 6-phase FSM with escalation and turn-limit safety net
 │   ├── prompt_builder.py          # Phase-specific session.update configs
-│   └── tool_executor.py           # Tool dispatch, preambles, timeout, retry, handoff context
+│   └── tool_executor.py           # Tool dispatch, wait_for_user, timeout, retry, handoff context
 ├── dashboard/
 │   ├── app.py                     # FastAPI app — REST API + WebSocket /ws/events
 │   ├── auth.py                    # Bearer token auth (HTTP + WebSocket)
@@ -138,7 +140,7 @@ Copy `.env.example` to `.env` and fill in your values:
 # OpenAI
 OPENAI_API_KEY=sk-...
 OPENAI_PROJECT_ID=proj_...
-OPENAI_MODEL=gpt-realtime-mini
+OPENAI_MODEL=gpt-realtime-2.1
 OPENAI_VOICE=alloy
 
 # Webhook (from OpenAI SIP project settings)
@@ -199,7 +201,9 @@ WRAP_UP    →  Ask if anything else; handle further issues with full tool set; 
 
 Each phase sends a `session.update` to the OpenAI Realtime API with phase-specific instructions and a scoped set of tools. The model calls `phase_complete` to advance; if it stalls, the FSM auto-advances after the phase turn limit (TRIAGE: 2, DIAGNOSE: 4, all others: 8).
 
-> **Realtime session-config schema:** `prompt_builder.build()` produces `{"type": "realtime", "model", "instructions", "tools", "tool_choice", "audio": {"input": {...}, "output": {...}}}`. Audio format fields are objects, not strings — `{"type": "audio/pcm", "rate": 24000}`, not `"pcm16"`. This same dict is sent as-is both as the REST body to `POST /v1/realtime/calls/{call_id}/accept` and nested under `{"type": "session.update", "session": ...}` for every WS phase transition. Requests to both the REST accept endpoint and the WebSocket use only `Authorization: Bearer <key>` — do **not** add an `OpenAI-Beta: realtime=v1` header; it routes the request to a stale API path whose call registry the WebSocket layer can't see, producing a `call_id_not_found` 404 on connect even though `/accept` returns 200.
+> **Realtime session-config schema:** `prompt_builder.build()` produces `{"type": "realtime", "model", "instructions", "tools", "tool_choice", "reasoning": {"effort": ...}, "audio": {"input": {...}, "output": {...}}}`. Audio format fields are objects, not strings — `{"type": "audio/pcm", "rate": 24000}`, not `"pcm16"`. This same dict is sent as-is both as the REST body to `POST /v1/realtime/calls/{call_id}/accept` and nested under `{"type": "session.update", "session": ...}` for every WS phase transition. Requests to both the REST accept endpoint and the WebSocket use only `Authorization: Bearer <key>` — do **not** add an `OpenAI-Beta: realtime=v1` header; it routes the request to a stale API path whose call registry the WebSocket layer can't see, producing a `call_id_not_found` 404 on connect even though `/accept` returns 200.
+>
+> **`conversation.item.create` content type:** assistant-authored `message` items (e.g. the pre-transfer escalation announcement in `conversation_fsm.py`) must use `content: [{"type": "output_text", "text": ...}]`. The old `"type": "text"` is rejected with `invalid_value` once the item is actually processed — the surrounding `conversation.item.create`/`response.create` calls still return success, so the failure only shows up as an `error` event a beat later in the WS event stream.
 
 ### Tool availability by phase
 
@@ -208,6 +212,7 @@ Tools available in DIAGNOSE/RESOLVE depend on the `service_category` set during 
 | Tool | Category | GREETING | VERIFY | TRIAGE | DIAGNOSE | RESOLVE | WRAP_UP |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|
 | `phase_complete` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `wait_for_user` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `escalate_to_agent` | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `lookup_customer` | — | — | ✓ | — | ✓ | ✓ | ✓ |
 | `get_service_status` | technical_support | — | — | — | ✓ | ✓ | ✓ |
